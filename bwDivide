@@ -1,0 +1,64 @@
+#!/usr/bin/env python
+'''
+Base-by-base division of one bigwig by another bigwig, e.g. ChIP divided by input
+
+Usage: bwDivide [-m <minD>] <bigwig1> <bigwig2> <bigwig_out>
+
+Options:
+    -m <minD>       minimum depth of <bigwig2> as a proportion of median <bigwig2> depth [default: 0.25]
+    <bigwig1>       input BigWig1
+    <bigwig2>       input BigWig2
+    <bigwig_out>    output BigWig
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+logging.basicConfig(
+        level=logging.WARN,
+        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        datefmt='%y-%m-%d %H:%M:%S')
+import pyBigWig
+import numpy as np
+
+tol = 1e-10
+
+def main(args):
+    logging.info(args)
+
+    minD = float(args['m'])
+    bw1 = pyBigWig.open(args['bigwig1'])
+    bw2 = pyBigWig.open(args['bigwig2'])
+    chroms = [(c,bw1.chroms(c)) for c in sorted(bw1.chroms())]
+    bw3 = pyBigWig.open(args['bigwig_out'], 'w')
+    bw3.addHeader(chroms)
+    for c,l in chroms:
+        x = bw1.values(c, 0, l, numpy=True)
+        y = bw2.values(c, 0, l, numpy=True)
+        z = x/y
+        # Remove regioins that has abnormally low coverage (less than <minD> of the median)
+        z[y<np.median(y)*minD] = -1
+        # Remove regioins that has "nan" or "inf" values after division
+        z[np.logical_or(np.isnan(z), np.isinf(z))] = -1
+        k = np.where(np.diff(z)>tol)[0] + 1
+        s = np.insert(k,0,0)
+        e = np.append(k,len(z))
+        v = z[e-1]
+        u = (v != -1)
+        bw3.addEntries(np.array([c]*np.sum(u)), s[u], ends=e[u], values=v[u])
+    bw1.close()
+    bw2.close()
+    bw3.close()
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)

@@ -1,0 +1,86 @@
+#!/usr/bin/env python
+'''
+Normalize or transform bigwig coverage
+
+Usage: bwNorm [-l <readLen>] [-x <chrom>] [-m <method>] (<input>) (<output>)
+
+Options:
+    <input>         input linear bigwig
+    <output>        output bigwig
+    -m <method>     normalization method, 'rpm', 'log2', 'zsc' [default: rpm]
+    -l <readLen>    read length, required if method is 'rpm'
+    -x <chrom>      exclude chromosome
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        datefmt='%y-%m-%d %H:%M:%S')
+import numpy as np
+import pyBigWig
+
+# Calculate RPM normalization coefficient
+def calcRPMCoef(bw, readLen, exChrom=None):
+    sortedChroms = sorted([chrom for chrom in bw.chroms() if chrom != exChrom])
+    totalBaseCount = sum([bw.stats(chrom, exact=True)[0]*bw.chroms(chrom) for chrom in sortedChroms])
+    readCount = totalBaseCount/readLen
+    normCoef = 1e6/readCount
+    logging.info('totalBaseCount/readCount/normCoef = {}/{}/{}'.format(totalBaseCount, readCount, normCoef))
+    return normCoef
+
+def main(args):
+    logging.debug(args)
+    method = args['m']
+    assert method in ('rpm','log2','zsc'), 'unsupported method: {}'.format(method)
+    if method == 'rpm':
+        assert args['l'] is not None, "<readLen> required by method 'rpm'"
+        readLen = int(args['l'])
+    exChrom = args['x']
+
+    iBW = pyBigWig.open(args['input'])
+    sortedChroms = sorted([chrom for chrom in iBW.chroms() if chrom != exChrom])
+    oBW = pyBigWig.open(args['output'], 'w')
+    oBW.addHeader([(chrom,iBW.chroms(chrom)) for chrom in sortedChroms])
+    if method == 'rpm':
+        normCoef = calcRPMCoef(iBW, readLen, exChrom)
+        for chrom in sortedChroms:
+            logging.debug(chrom)
+            intervals = np.array(iBW.intervals(chrom))
+            n = len(intervals)
+            oBW.addEntries(np.array([chrom]*n), intervals[:,0].astype(np.int64), ends=intervals[:,1].astype(np.int64), values=intervals[:,2]*normCoef)
+    elif method == 'log2':
+        for chrom in sortedChroms:
+            logging.debug(chrom)
+            intervals = np.array(iBW.intervals(chrom))
+            k = intervals[:,2]>0
+            n = np.sum(k)
+            oBW.addEntries(np.array([chrom]*n), intervals[k,0].astype(np.int64), ends=intervals[k,1].astype(np.int64), values=np.log2(intervals[k,2]))
+    elif method == 'zsc':
+        for chrom in sortedChroms:
+            logging.debug(chrom)
+            intervals = np.array(iBW.intervals(chrom))
+            n = len(intervals)
+            mu = iBW.stats(chrom, exact=True)[0]
+            sigma = iBW.stats(chrom, type='std', exact=True)[0]
+            oBW.addEntries(np.array([chrom]*n), intervals[:,0].astype(np.int64), ends=intervals[:,1].astype(np.int64), values=(intervals[:,2]-mu)/sigma)
+    else:
+        logging.error('unsupported method: {}'.format(method))
+    oBW.close()
+    iBW.close()
+    logging.info('done')
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)

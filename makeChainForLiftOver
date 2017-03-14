@@ -1,0 +1,57 @@
+#!/usr/bin/env perl
+# http://genomewiki.ucsc.edu/index.php/Minimal_Steps_For_LiftOver
+
+use strict;
+use warnings;
+use HuangN::Getopt;
+
+my $optparser = HuangN::Getopt->new(
+    'from|f=s'      => ['.FA', 1, 'Assembly to convert from'],
+    'to|t=s'        => ['.FA', 1, 'Assembly to convert to']
+);
+my $opt = $optparser->getopt();
+
+my $from_fa = $opt->{from};
+my $from_prefix = `basename $from_fa .fa`;
+chomp $from_prefix;
+
+my $from_2bit = $from_fa;
+$from_2bit =~ s/\.fa$/.2bit/;
+
+my $from_size = $from_prefix.'.chrom_size.txt';
+
+
+my $to_fa = $opt->{to};
+my $to_prefix = `basename $to_fa .fa`;
+chomp $to_prefix;
+
+my $to_2bit = $to_fa;
+$to_2bit =~ s/\.fa$/.2bit/;
+
+my $to_size = $to_prefix.'.chrom_size.txt';
+
+my $cmd =<<"EOF";
+twoBitInfo $from_2bit $from_size
+from_nchr=`cat $from_size | wc -l`
+
+twoBitInfo $to_2bit $to_size
+to_nchr=`cat $to_size | wc -l`
+
+faSplit sequence $to_fa \${to_nchr} ${to_prefix}chr
+
+for i in `seq 0 \${to_nchr}`
+do
+    blat $from_2bit ${to_prefix}chr\${i}.fa ${from_prefix}chr\${i}.psl -tileSize=12 -minScore=100 -minIdentity=98 -fastMap
+    liftUp -pslQ ${to_prefix}chr\${i}.lft warn ${from_prefix}chr\${i}.psl
+    axtChain -linearGap=medium -psl ${to_prefix}chr\${i}.psl $from_2bit $to_2bit chr\${i}.chain
+done
+
+chainMergeSort chr*.chain | chainSplit chain stdin
+
+mkdir net over
+cd chain
+chainNet chr.chain ../$from_size ../$to_size ../net/chr.net /dev/null
+netChainSubset ../net/chr.net chr.chain ../over/chr.chain
+EOF
+
+print $cmd;

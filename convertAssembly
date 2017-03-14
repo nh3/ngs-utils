@@ -1,0 +1,234 @@
+#!/usr/bin/env perl
+
+# Liftover
+
+use strict;
+use warnings;
+use HuangN::Getopt;
+use Log::Log4perl qw(:easy);
+use Data::Dumper;
+
+my $optparser = HuangN::Getopt->new(
+    'input|i=s'     => ['FILE', 1, 'input'],
+    'output|o=s'    => ['FILE', 0, 'output', '/dev/stdout'],
+    'fmt|f=s'       => ['STR',  0, 'format', 'BED'],
+    'chrsize|s=s'   => ['FILE', 0, 'chromosome size for output assembly, only required if --fmt is "bw"'],
+    'chain|c=s'     => ['FILE', 1, 'chain file for liftover'],
+    'debug|D'       => ['BOOL', 0, 'run in debug mode'],
+    'help|h'        => ['BOOL', 0, 'print this message']
+);
+my $opt = $optparser->getopt();
+if ($opt->{output} eq '/dev/stdout') {
+    $opt->{unmapped} = '/dev/null';
+} else {
+    $opt->{unmapped} = $opt->{output};
+    $opt->{unmapped} =~ s/(?:\.[^.]+)?$/.unmapped/;
+}
+
+# Prepare logger
+my $loglevel = $opt->{debug} ? $DEBUG : $ERROR;
+Log::Log4perl->easy_init({level=>$loglevel, layout=>"%p %F:%L\t%m%n"});
+DEBUG(Dumper($opt));
+
+# Check if dependent executables exist
+my @required_executables = qw(liftOver);
+if (lc($opt->{fmt}) =~ /^bw|bigwig$/) {
+    LOGEXIT("'-s|--chrsize' required if format is '$opt->{fmt}'") unless $opt->{chrsize};
+    push @required_executables, qw(bigWigToBedGraph bedGraphToBigWig)
+}
+&check_executable(@required_executables);
+
+# Check if chromosome namings are compatible
+my $chrom_incompat = &check_chrom_incompatibility($opt);
+
+# Convertion
+if (lc($opt->{fmt}) =~ /^bw|bigwig$/) {
+    my $tmp_bdg = `tempfile -s .bdg`;
+    chomp $tmp_bdg;
+    my $tmp_base = $tmp_bdg;
+    $tmp_base =~ s/.bdg$//;
+    my $new_bdg = $tmp_base.'-new.bdg';
+
+    my ($bw2bdg_cmd, $liftover_cmd, $bdg2bw_cmd);
+    if ($chrom_incompat > 0) {
+        $bw2bdg_cmd = "bigWigToBedGraph $opt->{input} stdout | sed 's/^/chr/' > $tmp_bdg";
+        $liftover_cmd = "liftOver $tmp_bdg $opt->{chain} stdout $opt->{unmapped} | sed 's/^chr//' > $new_bdg";
+    } elsif ($chrom_incompat < 0) {
+        $bw2bdg_cmd = "bigWigToBedGraph $opt->{input} stdout | sed 's/^chr//' > $tmp_bdg";
+        $liftover_cmd = "liftOver $tmp_bdg $opt->{chain} stdout $opt->{unmapped} | sed 's/^/chr/' > $new_bdg";
+    } else {
+        $bw2bdg_cmd = "bigWigToBedGraph $opt->{input} $tmp_bdg";
+        $liftover_cmd = "liftOver $tmp_bdg $opt->{chain} $new_bdg $opt->{unmapped}";
+    }
+    $bdg2bw_cmd = "bedGraphToBigWig $new_bdg $opt->{chrsize} $opt->{output}";
+    DEBUG($bw2bdg_cmd);
+    &execute($bw2bdg_cmd);
+    DEBUG($liftover_cmd);
+    &execute($liftover_cmd);
+    DEBUG($bdg2bw_cmd);
+    &execute($bdg2bw_cmd);
+
+    unlink $tmp_bdg, $new_bdg;
+}
+elsif (lc($opt->{fmt}) =~ /^wig$/) {
+    my $tmp_bdg = `tempfile -s .bdg`;
+    chomp $tmp_bdg;
+    my $tmp_base = $tmp_bdg;
+    $tmp_base =~ s/.bdg$//;
+    my $new_bdg = $tmp_base.'-new.bdg';
+
+    my $meta = &wig2bdg(input=>$opt->{input}, output=>$tmp_bdg, incompat=>$chrom_incompat);
+    my $liftover_cmd = "liftOver $tmp_bdg $opt->{chain} $new_bdg $opt->{unmapped}";
+    DEBUG($liftover_cmd);
+    &execute($liftover_cmd);
+    &bdg2wig(input=>$new_bdg, output=>$opt->{output}, incompat=>$chrom_incompat, meta=>$meta);
+
+    unlink $tmp_bdg, $new_bdg;
+}
+else {
+    my $liftover_cmd;
+    if ($chrom_incompat > 0) {
+        $liftover_cmd = "sed 's/^/chr/' $opt->{input} | liftOver stdin $opt->{chain} stdout $opt->{unmapped} | sed 's/^chr//' > $opt->{output}";
+    } elsif ($chrom_incompat < 0) {
+        $liftover_cmd = "sed 's/^chr//' $opt->{input} | liftOver stdin $opt->{chain} stdout $opt->{unmapped} | sed 's/^/chr/' > $opt->{output}";
+    } else {
+        $liftover_cmd = "liftOver $opt->{input} $opt->{chain} $opt->{output} $opt->{unmapped}";
+    }
+    DEBUG($liftover_cmd);
+    &execute($liftover_cmd);
+}
+
+
+########################################
+# subroutines
+########################################
+sub check_executable(@) {
+    for my $cmd (@_) {
+        my $path = `which $cmd`;
+        chomp $path;
+        LOGEXIT("[$cmd] not found") unless $path;
+        DEBUG($path);
+    }
+}
+
+sub check_chrom_incompatibility($) {
+    my $opt = shift;
+    my $input_chrom = &read_input_chrom($opt->{input}, $opt->{fmt});
+    my $chain_chrom = &read_chain_chrom($opt->{chain});
+
+    my $incompat = 0;
+    if ($chain_chrom =~ /^chr/ and $input_chrom !~ /^chr/) { $incompat = 1; }
+    elsif ($chain_chrom !~ /^chr/ and $input_chrom =~ /^chr/) { $incompat = -1; }
+    else { $incompat = 0; }
+    WARN("chromosome names incompatible between $opt->{input} and $opt->{chain}") if $incompat;
+
+    if ($opt->{fmt} =~ /^bw|bigwig$/) {
+        my $size_chrom  = &read_size_chrom($opt->{chrsize});
+        LOGEXIT("chromosome names incompatible between $opt->{size} and $opt->{input}") if ($input_chrom =~ /^chr/ and $size_chrom !~ /^chr/) or ($chain_chrom !~ /^chr/ and $size_chrom =~ /^chr/);
+    }
+    return $incompat;
+}
+
+sub read_input_chrom($$) {
+    my $input = shift;
+    my $fmt = shift;
+    my $chrom;
+    $chrom = `head -100 $input | egrep -v '^track|^browser|^#' | head -1 | cut -f1` if lc($fmt) =~ /^bed|bdg|bedg|bedgraph$/;
+    $chrom = `bigWigToBedGraph $input stdout | head -1 | cut -f1` if lc($fmt) =~ /^bw|bigwig$/;
+    $chrom = `head -100 $input | egrep -o 'chrom=[^ ]+' | head -1 | cut -f2 -d'='` if lc($fmt) =~ /^wig$/;
+    chomp $chrom;
+    return $chrom;
+    LOGEXIT("unsupported format [$fmt]");
+}
+
+sub read_size_chrom($) { my $chrom = `head -1 $_[0] | cut -f1`; chomp $chrom; $chrom; }
+
+sub read_chain_chrom($) { my $chrom = `zcat $_[0] | head -1 | cut -f3 -d' '`; chomp $chrom; $chrom; }
+
+sub execute($) {
+    system($_[0]);
+    return if $? == 0;
+
+    if ($? == -1) {
+        LOGEXIT("failed to execute: $!");
+    } elsif ($? & 127) {
+        LOGEXIT("died with signal: ", $? & 127);
+    } else {
+        LOGEXIT("exited with value: ", $? >> 0);
+    }
+}
+
+sub wig2bdg(%) {
+    my %args = (incompat=>0, @_);
+    open(my $fin, '<', $args{input}) or LOGEXIT("$args{input}: $!\n");
+    open(my $fout, '>', $args{output}) or LOGEXIT("$args{output}: $!\n");
+    my @headers;
+    my ($type, $chrom, $span, $n, $start, $step, $s, $v);
+    while (my $line = <$fin>) {
+        if ($line =~/^track/ or $line =~ /^browser/ or $line =~ /^#/) {
+            push @headers, $line;
+            next;
+        }
+        chomp $line;
+        if ($line =~ /^(variable|fixed)Step\s+(.*)$/) {
+            $type = $1;
+            $n = 0;
+            my $section = {map { split('=', $_); } split(/\s+/, $2)};
+            $chrom = $section->{chrom};
+            $chrom =~ s/^/chr/ if $args{incompat} > 0;
+            $chrom =~ s/^chr// if $args{incompat} < 0;
+            $span = exists $section->{span} ? $section->{span} : 1;
+            if ($type eq 'fixed') {
+                $start = $section->{start};
+                $step = $section->{step};
+                $s = $start - $step;
+            }
+        } else {
+            if ($type eq 'fixed') {
+                $v = $line;
+                $s += $step;
+            } else {
+                ($s, $v) = split(/\s+/, $line);
+            }
+            print {$fout} join("\t", $chrom, $s, $s+$span, $v), "\n";
+        }
+    }
+    close($fout);
+    close($fin);
+
+    return {header=>\@headers, type=>$type, span=>$span, step=>$step};
+}
+
+sub bdg2wig(%) {
+    my %args = (meta=>{type=>'variable', span=>1, header=>''}, incompat=>0, @_);
+    my $headers = $args{meta}->{header};
+    my $type = $args{meta}->{type};
+    my $span = $args{meta}->{span};
+    my $step = $args{meta}->{step};
+
+    open(my $fin, '<', $args{input}) or LOGEXIT("$args{input}: $!\n");
+    open(my $fout, '>', $args{output}) or LOGEXIT("$args{output}: $!\n");
+
+    print {$fout} join('', @$headers);
+
+    my $prev_chrom = '';
+    while (my $line = <$fin>) {
+        chomp $line;
+        my ($c, $s, $e, $v) = split(/\t/, $line);
+        $c =~ s/^chr// if $args{incompat} > 0;
+        $c =~ s/^/chr/ if $args{incompat} < 0;
+        if ($type eq 'variable') {
+            print {$fout} "variableStep chrom=$c span=$span\n" if $c ne $prev_chrom;
+            print {$fout} "$s\t$v\n";
+        } else {
+            print {$fout} "fixedStep chrom=$c start=$s step=$step span=$span\n" if $c ne $prev_chrom;
+            print {$fout} "$v\n";
+        }
+        $prev_chrom = $c;
+    }
+    close($fout);
+    close($fin);
+}
+########################################
+# subroutines end
+########################################

@@ -1,0 +1,35 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use HuangN::Getopt;
+use Data::Dumper;
+
+my $optparser = HuangN::Getopt->new(
+    'bam|b=s'       => ['FILE', 1, 'bam input'],
+    'chrsize|c=s'   => ['FILE', 1, 'chrom size'],
+    'outbw|o=s'     => ['FILE', 1, 'bw output'],
+    'fill|f'        => ['BOOL', 0, 'fill zero', 1],
+    'rpm|r'         => ['BOOL', 0, 'normalized by library size', 1],
+    'extra|x=s'     => ['STR',  0, 'extra options passed to bedtools genomecov', ''],
+    'help|h'        => ['BOOL', 0, 'help'],
+);
+my $opt = $optparser->getopt();
+
+my $bdg = `tempfile`;
+chomp $bdg;
+my $cov = "bedtools genomecov -ibam $opt->{bam} -g $opt->{chrsize} $opt->{extra}";
+$cov .= ' -bga' if $opt->{fill};
+if ($opt->{rpm}) {
+    my $n = `sambamba view -c $opt->{bam}`;
+    chomp $n;
+    my $f = 1e6/$n;
+    $cov .= " -scale $f";
+}
+$cov .= " > $bdg";
+system($cov);
+
+my $bw = "bedGraphToBigWig $bdg $opt->{chrsize} $opt->{outbw}";
+system($bw);
+
+unlink $bdg if $? == 0;

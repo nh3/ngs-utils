@@ -1,0 +1,47 @@
+#!/usr/bin/env python
+'''
+Usage: downSampleBam [-c count] [-f frac] [-s seed] (<bam>) (<output>)
+
+Options:
+    <bam>       input bam
+    <output>    output bam
+    -c count    target count
+    -f frac     target fraction, override -c
+    -s seed     seed for random sampling [default: 1]
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+import subprocess as sbp
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        datefmt='%y-%m-%d %H:%M:%S')
+
+def main(args):
+    logging.debug(args)
+    assert args['c'] is not None or args['f'] is not None, 'require [-c count|-f frac]'
+    if args['f'] is not None:
+        tgtF = float(args['f'])
+    else:
+        tgtC = int(args['c'])
+        cmd = 'sambamba view -c {}'.format(args['bam'])
+        cnt = float(sbp.check_output(cmd, shell=True, executable='/bin/bash').rstrip())
+        assert cnt > tgtC, 'target read count ({}) smaller than actual read count ({})'.format(tgtC, cnt)
+        tgtF = tgtC / cnt
+    cmd = 'sambamba view -s {} --subsampling-seed {} -f bam -o {} {}'.format(tgtF, args['s'], args['output'], args['bam'])
+    sbp.check_call(cmd, shell=True, executable='/bin/bash')
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)

@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+'''
+Usage: trimFq (-5 <n>) [-3 <m>] [<input>]
+
+Options:
+    <input>     input, read from stdin if omitted
+    -5 <n>      integer, positive means keep <n> bases from 5', negative means trim <n> from 5', 0 means do nothing
+    -3 <m>      integer, same meaning as '-5', when in conflict, '-5' takes priority [default: 0]
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+logging.basicConfig(
+        level=logging.WARNING,
+        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        datefmt='%y-%m-%d %H:%M:%S')
+
+def main(args):
+    logging.debug(args)
+    trim5 = int(args['5'])
+    trim3 = int(args['3'])
+    start = 0
+    end = 0
+    if trim5 > 0:
+        end = trim5
+    elif trim5 < 0:
+        start = -trim5
+    if trim3 < 0:
+        end = trim3
+    if trim3 > 0:
+        start = -trim3
+
+    if args['input'] is None:
+        stream = sys.stdin
+    else:
+        stream = open(args['input'], 'r')
+    i = 0
+    for line in stream:
+        i += 1
+        if i % 2 == 0:
+            seq = line.rstrip()
+            if end <= 0:
+                end = len(seq) + end
+            print(seq[start:end])
+        else:
+            print(line, end='')
+    stream.close()
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)

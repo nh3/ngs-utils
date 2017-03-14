@@ -1,0 +1,73 @@
+#!/usr/bin/env python
+'''
+Usage: fqLen [-p] [-n <number>] [<input>]
+
+Options:
+    -n <number>     check the first <number> of records [default: 1] 
+    -p              print length of each read
+    <input>         fastq or gzipped fastq, read from stdin if omitted
+'''
+
+from __future__ import print_function
+import sys
+import gzip
+import numpy as np
+import signal
+import logging
+logging.basicConfig(
+        level=logging.WARNING,
+        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        datefmt='%y-%m-%d %H:%M:%S')
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+
+def main(args):
+    logging.debug(args)
+    n = int(args['n'])
+    assert n >= 1, '<number> must be a positive integer (n={})'.format(n)
+    fileName = args['input']
+    if args['input'] is None:
+        stream = sys.stdin
+    else:
+        if fileName.endswith('.gz'):
+            stream = gzip.open(fileName, 'rb')
+        else:
+            stream = open(fileName, 'r')
+
+    seqLen = []
+    for i in xrange(n):
+        readName = stream.readline()
+        if readName == '':
+            break
+        assert readName.startswith('@'), 'malformatted FASTQ ({})'.format(readName)
+        seq = stream.readline().rstrip()
+        seqLen.append(len(seq))
+        stream.readline()
+        stream.readline()
+    stream.close()
+
+    seqLen = np.array(seqLen)
+    assert len(seqLen) > 0, 'no reads found'
+    if args['p']:
+        print('\n'.join(seqLen.astype('S')))
+    else:
+        if n == 1:
+            percent = (100,)
+        elif n <= 5:
+            percent = (0, 50, 100)
+        else:
+            percent = (0, 25, 50, 75, 100)
+        lenStats = np.percentile(seqLen, percent)
+        print('\t'.join(lenStats.astype('S')))
+
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)

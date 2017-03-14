@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+'''
+Map a set of genomic features to another, pick one with highest Jaccard Index if not unique
+
+Usage: mapFeature (-a <input1>) (-b <input2>)
+
+Options:
+    -a <input1>    input1, features to map uniquely, typically (though not always) smaller, e.g. chip-seq peaks
+    -b <input2>    input2, features to map onto, typically (though not always) larger, e.g. genes
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+import subprocess as sbp
+import tempfile
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+logging.basicConfig(
+        level=logging.WARN,
+        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        datefmt='%y-%m-%d %H:%M:%S')
+
+def firstPassMapping(input1, input2):
+    '''
+    Receive two inputs in BED-minimum-compatible format
+    Return c1,s1,e1,c2,s2,e2,ovlp,jaccard for 'bedtools intersect -wao'
+    '''
+    cmd = 'bedtools intersect -a <(cut -f1-3 {input1}) -b <(cut -f1-3 {input2}) -wao'.format(input1=input1,input2=input2)
+    output = sbp.check_output(cmd, shell=True, executable='/bin/bash').rstrip().split('\n')
+    pass1 = tempfile.NamedTemporaryFile()
+    for line in output:
+        c1,s1,e1,c2,s2,e2,ovlp = line.rstrip().split('\t')
+        jaccard = float(ovlp)/(max(int(e1),int(e2))-min(int(s1),int(s2)))
+        print('\t'.join([c1,s1,e1,c2,s2,e2,ovlp,str(jaccard)]), file=pass1)
+    pass1.flush()
+    return pass1
+
+def pickMaxJaccard(pass1):
+    cmd = 'bedtools groupby -i <(sort -k1,1 -k2,2n -k3,3n -k8,8rg {pass1}) -g 1,2,3 -c 8 -o max -full | cut -f1-8'.format(pass1=pass1)
+    output = sbp.check_output(cmd, shell=True, executable='/bin/bash').rstrip().split('\n')
+    for line in output:
+        print(line)
+    return 0
+
+def main(args):
+    logging.debug(args)
+    pass1 = firstPassMapping(args['a'],args['b'])
+    pickMaxJaccard(pass1.name)
+    return 0
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)

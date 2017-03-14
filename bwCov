@@ -1,0 +1,159 @@
+#!/usr/bin/env python
+'''
+Extract coverage at a list of locations from bigwigs
+
+Usage: bwCov [-b <bed>] [-S --ignstr] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [-O <op>] <bigwig>...
+
+Options:
+    <bigwig>        input BigWig
+    -b <bed>        input BED, read from stdin if omitted
+    -S --ignstr     ignore strand information from the input BED
+    -w <stepWidth>  number of bp per calculated data point
+    -l <left>       number of data points to the left [default: 0]
+    -r <right>      number of data points to the right [default: 0]
+    -m <mid>        number of data points inside the interval [default: 0]
+    -O <op>         stats operation, 'mean' or 'median' [default: mean]
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        datefmt='%y-%m-%d %H:%M:%S')
+import pyBigWig
+import numpy as np
+
+class GenomicFeature(object):
+    def __init__(self, chrom, start, end, name, strand):
+        self.chrom = chrom
+        self.start = start
+        self.end = end
+        self.name = name
+        self.size = end - start
+        self.strand = strand
+
+def readBed(filename, chromSize, ignoreStrand=False):
+    if filename is None:
+        stream = sys.stdin
+    else:
+        stream = open(filename)
+    features = []
+    for line in stream:
+        fields = line.rstrip().split()
+        nf = len(fields)
+        chrom = fields[0]
+        start = int(fields[1])
+        end = int(fields[2])
+        if nf < 4:
+            name = '{0}:{1}-{2}'.format(*fields)
+            strand = '+'
+        else:
+            name = fields[3]
+            if nf > 5 and not ignoreStrand:
+                strand = fields[5]
+            else:
+                strand = '+'
+        start = min(max(0, start), chromSize[chrom])
+        end = min(max(0, end), chromSize[chrom])
+        features.append(GenomicFeature(chrom,start,end,name,strand))
+    logging.info('done')
+    return features
+
+def getChromSizeFromBW(filename):
+    bw = pyBigWig.open(filename)
+    chromSize = bw.chroms()
+    bw.close()
+    return chromSize
+
+def initDataArray(nBigWig, nFeature, nStep):
+    array = np.zeros((nBigWig, nFeature, nStep)) * np.nan
+    logging.info('done')
+    return array
+
+def calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight=None):
+    if nRight is None:
+        nRight = nLeft
+    leftMost,leftSize = [],[]
+    rightMost,rightSize = [],[]
+    for f in features:
+        if f.strand == '+':
+            pLeft = f.start - stepWidth*nLeft
+            mLeft = nLeft
+            pRight = f.end + stepWidth*nRight
+            mRight = nRight
+        else:
+            pLeft = f.start - stepWidth*nRight
+            mLeft = nRight
+            pRight = f.end + stepWidth*nLeft
+            mRight = nLeft
+        if pLeft < 0:
+            mLeft = int(f.start/stepWidth)
+            pLeft = f.start - mLeft*stepWidth
+        if pRight > chromSize[f.chrom]:
+            mRight = int((chromSize[f.chrom]-f.end)/stepWidth)
+            pRight = f.end + mRight*stepWidth
+        leftMost.append(pLeft)
+        leftSize.append(mLeft)
+        rightMost.append(pRight)
+        rightSize.append(mRight)
+    logging.info('done')
+    return leftMost,leftSize,rightMost,rightSize
+
+def populateDataArray():
+    pass
+
+def statFuncChoice(stat):
+    functions = {'mean':np.nanmean, 'median':np.nanmedian}
+    return functions[stat]
+
+def main(args):
+    logging.info(args)
+
+    bigwigs = args['bigwig']
+    inputBed = args['b']
+    stepWidth,nLeft,nRight,nMid = int(args['w']),int(args['l']),int(args['r']),int(args['m'])
+    calcStat = statFuncChoice(args['O'])
+
+    chromSize = getChromSizeFromBW(bigwigs[0])
+    features = readBed(inputBed, chromSize, ignoreStrand=args['ignstr'])
+    leftMost,leftSize,rightMost,rightSize = calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight)
+    data = initDataArray(len(bigwigs), len(features), nLeft+nRight+nMid)
+
+    nLeftMid = nLeft + nMid
+    for i,bwFileName in enumerate(bigwigs):
+        bw = pyBigWig.open(bwFileName)
+        for j,f in enumerate(features):
+            lm,rm,ls,rs = leftMost[j],rightMost[j],leftSize[j],rightSize[j]
+            xLeft = bw.stats(f.chrom, lm, f.start, nBins=ls)
+            xRight = bw.stats(f.chrom, f.end, rm, nBins=rs)
+            xMid = bw.stats(f.chrom, f.start, f.end, nBins=nMid)
+            if f.strand == '+':
+                data[i,j,(nLeft-ls):nLeft] = xLeft
+                data[i,j,nLeft:nLeftMid] = xMid
+                data[i,j,nLeftMid:(nLeftMid+rs)] = xRight
+            else:
+                data[i,j,(nLeft-ls):nLeft] = xRight[::-1]
+                data[i,j,nLeft:nLeftMid] = xMid[::-1]
+                data[i,j,nLeftMid:(nLeftMid+rs)] = xLeft[::-1]
+        bw.close()
+        stat = calcStat(data[i,...], axis=0, keepdims=True)
+        np.savetxt(sys.stdout, stat, fmt='%.4f', delimiter='\t')
+
+    logging.info('done')
+    return 0
+
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)
