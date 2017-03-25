@@ -1,18 +1,18 @@
 #!/usr/bin/env python
 '''
-Extract coverage at a list of locations from bigwigs
+Extract and calculate coverage stats at a list of locations from bigwigs
 
-Usage: bwCov [-b <bed>] [-S --ignstr] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [-O <op>] <bigwig>...
+Usage: bwCov [-b <bed>] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [--ignstr] [--full] <bigwig>...
 
 Options:
     <bigwig>        input BigWig
     -b <bed>        input BED, read from stdin if omitted
-    -S --ignstr     ignore strand information from the input BED
     -w <stepWidth>  number of bp per calculated data point
     -l <left>       number of data points to the left [default: 0]
     -r <right>      number of data points to the right [default: 0]
     -m <mid>        number of data points inside the interval [default: 0]
-    -O <op>         stats operation, 'mean' or 'median' [default: mean]
+    --ignstr        ignore strand information from the input BED
+    --full          print full value table rather than stats (mean,2.5pct,median,97.5pct)
 '''
 
 from __future__ import print_function
@@ -21,11 +21,13 @@ import signal
 import logging
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        level=logging.INFO,
+        format='%(asctime)s; %(levelname)s; %(funcName)s() %(message)s',
         datefmt='%y-%m-%d %H:%M:%S')
 import pyBigWig
 import numpy as np
+import os.path
+import cProfile
 
 class GenomicFeature(object):
     def __init__(self, chrom, start, end, name, strand):
@@ -35,6 +37,33 @@ class GenomicFeature(object):
         self.name = name
         self.size = end - start
         self.strand = strand
+
+class IntervalBoundary(object):
+    def __init__(self, chrom, start, end, strand, stepWidth, leftStep, rightStep, midStep=0):
+        self.chrom = chrom
+        self.leftMid = start
+        self.rightMid = end
+        self.strand = strand
+        self.stepWidth = stepWidth
+        self.leftStep = leftStep
+        self.rightStep = rightStep
+        self.midStep = midStep
+        self.leftMost = start - stepWidth*leftStep
+        self.rightMost = end + stepWidth*rightStep
+
+    def __str__(self):
+        return '{0.chrom}\t{0.leftMost}\t{0.leftMid}\t{0.rightMid}\t{0.rightMost}'.format(self)
+
+    def getCoverage(self, bwData, nLeft, nRight, nMid=0):
+        nLeftMid = nLeft + nMid
+        x = np.zeros(nLeft+nRight+nMid) * np.nan
+        if self.leftStep>0:
+            x[(nLeft-self.leftStep):nLeft] = np.nanmean(bwData[self.chrom][self.leftMost:self.leftMid].reshape((self.leftStep,self.stepWidth)), axis=1)
+        if nMid>0:
+            x[nLeft:nLeftMid] = np.interp(x=np.linspace(self.leftMid, self.rightMid, nMid), xp=np.arange(self.leftMid, self.rightMid), fp=bwData[self.chrom][self.leftMid:self.rightMid])
+        if self.rightStep>0:
+            x[nLeftMid:(nLeftMid+self.rightStep)] = np.nanmean(bwData[self.chrom][self.rightMid:self.rightMost].reshape((self.rightStep,self.stepWidth)), axis=1)
+        return x
 
 def readBed(filename, chromSize, ignoreStrand=False):
     if filename is None:
@@ -63,20 +92,25 @@ def readBed(filename, chromSize, ignoreStrand=False):
     logging.info('done')
     return features
 
+def cacheBW(filename):
+    bw = pyBigWig.open(filename)
+    chromSize = bw.chroms()
+    bwData = {chrom:bw.values(chrom,0,chromSize[chrom],numpy=True) for chrom in chromSize}
+    bw.close()
+    nMB = sum([bwData[k].nbytes for k in bwData])/1024/1024
+    logging.info('{} cached using {}MB of memory'.format(filename, nMB))
+    return bwData
+
 def getChromSizeFromBW(filename):
     bw = pyBigWig.open(filename)
     chromSize = bw.chroms()
     bw.close()
     return chromSize
 
-def initDataArray(nBigWig, nFeature, nStep):
-    array = np.zeros((nBigWig, nFeature, nStep)) * np.nan
-    logging.info('done')
-    return array
-
-def calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight=None):
+def calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight=None, nMid=0):
     if nRight is None:
         nRight = nLeft
+    intervals = []
     leftMost,leftSize = [],[]
     rightMost,rightSize = [],[]
     for f in features:
@@ -92,58 +126,62 @@ def calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight=None):
             mRight = nLeft
         if pLeft < 0:
             mLeft = int(f.start/stepWidth)
-            pLeft = f.start - mLeft*stepWidth
         if pRight > chromSize[f.chrom]:
             mRight = int((chromSize[f.chrom]-f.end)/stepWidth)
-            pRight = f.end + mRight*stepWidth
-        leftMost.append(pLeft)
-        leftSize.append(mLeft)
-        rightMost.append(pRight)
-        rightSize.append(mRight)
+        if f.size >= stepWidth*nMid:
+            pass
+        else:
+            midStepWidth = f.size / nMid
+            if midStepWidth == 0:
+                pass
+        intervals.append(IntervalBoundary(f.chrom, f.start, f.end, f.strand, stepWidth, mLeft, mRight, nMid))
     logging.info('done')
-    return leftMost,leftSize,rightMost,rightSize
+    return intervals
 
-def populateDataArray():
-    pass
+def extractBigWigValues(bwData, intervals, nLeft, nRight, nMid=0):
+    n = len(intervals)
+    m = nLeft + nRight + nMid
+    data = np.zeros((n,m)) * np.nan
+    for i,itv in enumerate(intervals):
+        x = itv.getCoverage(bwData, nLeft, nRight, nMid)
+        if itv.strand == '+':
+            data[i] = x
+        else:
+            data[i] = x[::-1]
+    logging.info('done')
+    return data
 
-def statFuncChoice(stat):
-    functions = {'mean':np.nanmean, 'median':np.nanmedian}
-    return functions[stat]
+def writeStats(filename, data, full=False):
+    name = os.path.splitext(os.path.basename(filename))[0]
+    if full:
+        stats = data
+    else:
+        stats = np.vstack((np.nanmean(data, axis=0),
+            np.nanpercentile(data, q=(2.5,50,97.5), interpolation='midpoint', axis=0)))
+    n = len(stats)
+    nameColumn = np.array([name]*n).reshape(n,1)
+    outdat = np.hstack((nameColumn, stats))
+    np.savetxt(sys.stdout, outdat, fmt='%s', delimiter='\t')
+    return 0
+
 
 def main(args):
-    logging.info(args)
+    logging.debug(args)
 
     bigwigs = args['bigwig']
     inputBed = args['b']
     stepWidth,nLeft,nRight,nMid = int(args['w']),int(args['l']),int(args['r']),int(args['m'])
-    calcStat = statFuncChoice(args['O'])
 
     chromSize = getChromSizeFromBW(bigwigs[0])
     features = readBed(inputBed, chromSize, ignoreStrand=args['ignstr'])
-    leftMost,leftSize,rightMost,rightSize = calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight)
-    data = initDataArray(len(bigwigs), len(features), nLeft+nRight+nMid)
+    intervals = calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight, nMid)
+    n = len(intervals)
 
-    nLeftMid = nLeft + nMid
     for i,bwFileName in enumerate(bigwigs):
-        bw = pyBigWig.open(bwFileName)
-        for j,f in enumerate(features):
-            lm,rm,ls,rs = leftMost[j],rightMost[j],leftSize[j],rightSize[j]
-            xLeft = bw.stats(f.chrom, lm, f.start, nBins=ls)
-            xRight = bw.stats(f.chrom, f.end, rm, nBins=rs)
-            xMid = bw.stats(f.chrom, f.start, f.end, nBins=nMid)
-            if f.strand == '+':
-                data[i,j,(nLeft-ls):nLeft] = xLeft
-                data[i,j,nLeft:nLeftMid] = xMid
-                data[i,j,nLeftMid:(nLeftMid+rs)] = xRight
-            else:
-                data[i,j,(nLeft-ls):nLeft] = xRight[::-1]
-                data[i,j,nLeft:nLeftMid] = xMid[::-1]
-                data[i,j,nLeftMid:(nLeftMid+rs)] = xLeft[::-1]
-        bw.close()
-        stat = calcStat(data[i,...], axis=0, keepdims=True)
-        np.savetxt(sys.stdout, stat, fmt='%.4f', delimiter='\t')
-
-    logging.info('done')
+        bwData = cacheBW(bwFileName)
+        data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid)
+        writeStats(bwFileName, data, full=args['full'])
+    logging.info('all done successfully')
     return 0
 
 
