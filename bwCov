@@ -2,7 +2,7 @@
 '''
 Extract and calculate coverage stats at a list of locations from bigwigs
 
-Usage: bwCov [-b <bed>] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [--ignstr] [--full] <bigwig>...
+Usage: bwCov [-b <bed>] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [--ignstr] [--fillzero] [--full] <bigwig>...
 
 Options:
     <bigwig>        input BigWig
@@ -11,6 +11,7 @@ Options:
     -l <left>       number of data points to the left [default: 0]
     -r <right>      number of data points to the right [default: 0]
     -m <mid>        number of data points inside the interval [default: 0]
+    --fillzero      fill zero where there is no data
     --ignstr        ignore strand information from the input BED
     --full          print full value table rather than stats (mean,2.5pct,median,97.5pct)
 '''
@@ -21,13 +22,14 @@ import signal
 import logging
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 logging.basicConfig(
-        level=logging.INFO,
+        level=logging.WARN,
         format='%(asctime)s; %(levelname)s; %(funcName)s() %(message)s',
         datefmt='%y-%m-%d %H:%M:%S')
+import os.path
 import pyBigWig
 import numpy as np
-import os.path
-import cProfile
+from scipy.stats import sem
+from scipy.stats import t
 
 class GenomicFeature(object):
     def __init__(self, chrom, start, end, name, strand):
@@ -54,13 +56,15 @@ class IntervalBoundary(object):
     def __str__(self):
         return '{0.chrom}\t{0.leftMost}\t{0.leftMid}\t{0.rightMid}\t{0.rightMost}'.format(self)
 
-    def getCoverage(self, bwData, nLeft, nRight, nMid=0):
+    def getCoverage(self, bwData, nLeft, nRight, nMid=0, fillZero=False):
         nLeftMid = nLeft + nMid
-        x = np.zeros(nLeft+nRight+nMid) * np.nan
+        x = np.zeros(nLeft+nRight+nMid)
+        if not fillZero:
+            x = x * np.nan
         if self.leftStep>0:
             x[(nLeft-self.leftStep):nLeft] = np.nanmean(bwData[self.chrom][self.leftMost:self.leftMid].reshape((self.leftStep,self.stepWidth)), axis=1)
         if nMid>0:
-            x[nLeft:nLeftMid] = np.interp(x=np.linspace(self.leftMid, self.rightMid, nMid), xp=np.arange(self.leftMid, self.rightMid), fp=bwData[self.chrom][self.leftMid:self.rightMid])
+            x[nLeft:nLeftMid] = bwData[self.chrom][np.linspace(self.leftMid, self.rightMid-1, nMid, dtype=int)]
         if self.rightStep>0:
             x[nLeftMid:(nLeftMid+self.rightStep)] = np.nanmean(bwData[self.chrom][self.rightMid:self.rightMost].reshape((self.rightStep,self.stepWidth)), axis=1)
         return x
@@ -138,12 +142,12 @@ def calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight=None, nM
     logging.info('done')
     return intervals
 
-def extractBigWigValues(bwData, intervals, nLeft, nRight, nMid=0):
+def extractBigWigValues(bwData, intervals, nLeft, nRight, nMid=0, fillZero=False):
     n = len(intervals)
     m = nLeft + nRight + nMid
     data = np.zeros((n,m)) * np.nan
     for i,itv in enumerate(intervals):
-        x = itv.getCoverage(bwData, nLeft, nRight, nMid)
+        x = itv.getCoverage(bwData, nLeft, nRight, nMid, fillZero=fillZero)
         if itv.strand == '+':
             data[i] = x
         else:
@@ -151,17 +155,22 @@ def extractBigWigValues(bwData, intervals, nLeft, nRight, nMid=0):
     logging.info('done')
     return data
 
-def writeStats(filename, data, full=False):
+def writePositions(nLeft, nRight, nMid=0, fh=sys.stdout):
+    m = nLeft + nRight + nMid
+    np.savetxt(fh, np.hstack(('position', np.arange(-nLeft, nMid+nRight, dtype=int))).reshape((1,m+1)), fmt='%s', delimiter='\t')
+
+def writeStats(filename, data, fh=sys.stdout, full=False):
     name = os.path.splitext(os.path.basename(filename))[0]
     if full:
         stats = data
     else:
+        n,m = data.shape
         stats = np.vstack((np.nanmean(data, axis=0),
-            np.nanpercentile(data, q=(2.5,50,97.5), interpolation='midpoint', axis=0)))
-    n = len(stats)
-    nameColumn = np.array([name]*n).reshape(n,1)
+            t.ppf(0.975,n-1)*sem(data, axis=0, nan_policy='omit')))
+    N = len(stats)
+    nameColumn = np.array([name]*N).reshape(N,1)
     outdat = np.hstack((nameColumn, stats))
-    np.savetxt(sys.stdout, outdat, fmt='%s', delimiter='\t')
+    np.savetxt(fh, outdat, fmt='%s', delimiter='\t')
     return 0
 
 
@@ -177,9 +186,10 @@ def main(args):
     intervals = calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight, nMid)
     n = len(intervals)
 
+    writePositions(nLeft, nRight, nMid=nMid)
     for i,bwFileName in enumerate(bigwigs):
         bwData = cacheBW(bwFileName)
-        data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid)
+        data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
         writeStats(bwFileName, data, full=args['full'])
     logging.info('all done successfully')
     return 0
