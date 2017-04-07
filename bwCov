@@ -7,7 +7,7 @@ Usage: bwCov [-b <bed>] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [--
 Options:
     <bigwig>        input BigWig
     -b <bed>        input BED, read from stdin if omitted
-    -w <stepWidth>  number of bp per calculated data point
+    -w <stepWidth>  number of bp per calculated data point [default: 10]
     -l <left>       number of data points to the left [default: 0]
     -r <right>      number of data points to the right [default: 0]
     -m <mid>        number of data points inside the interval [default: 0]
@@ -159,8 +159,7 @@ def writePositions(nLeft, nRight, nMid=0, fh=sys.stdout):
     m = nLeft + nRight + nMid
     np.savetxt(fh, np.hstack(('position', np.arange(-nLeft, nMid+nRight, dtype=int))).reshape((1,m+1)), fmt='%s', delimiter='\t')
 
-def writeStats(filename, data, fh=sys.stdout, full=False):
-    name = os.path.splitext(os.path.basename(filename))[0]
+def writeStats(name, data, fh=sys.stdout, full=False):
     if full:
         stats = data
     else:
@@ -187,11 +186,18 @@ def main(args):
     n = len(intervals)
 
     writePositions(nLeft, nRight, nMid=nMid)
+    success = 0
     for i,bwFileName in enumerate(bigwigs):
-        bwData = cacheBW(bwFileName)
-        data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
-        writeStats(bwFileName, data, full=args['full'])
-    logging.info('all done successfully')
+        try:
+            bwData = cacheBW(bwFileName)
+            data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
+        except:
+            logging.ERROR('failed to get values from {}'.format(bwFileName))
+            continue
+        name = os.path.splitext(os.path.basename(bwFileName))[0]
+        writeStats(name, data, full=args['full'])
+        success += 1
+    logging.info('{}/{} done successfully'.format(success, len(bigwigs)))
     return 0
 
 
