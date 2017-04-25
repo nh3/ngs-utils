@@ -155,9 +155,9 @@ def extractBigWigValues(bwData, intervals, nLeft, nRight, nMid=0, fillZero=False
     logging.info('done')
     return data
 
-def writePositions(nLeft, nRight, nMid=0, fh=sys.stdout):
+def writePositions(nLeft, nRight, nMid=0, stepWidth=10, fh=sys.stdout):
     m = nLeft + nRight + nMid
-    np.savetxt(fh, np.hstack(('position', np.arange(-nLeft, nMid+nRight, dtype=int))).reshape((1,m+1)), fmt='%s', delimiter='\t')
+    np.savetxt(fh, np.hstack(('position', np.arange(-nLeft, nMid+nRight, dtype=int)*stepWidth)).reshape((1,m+1)), fmt='%s', delimiter='\t')
 
 def writeStats(name, data, fh=sys.stdout, full=False):
     if full:
@@ -185,7 +185,7 @@ def main(args):
     intervals = calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight, nMid)
     n = len(intervals)
 
-    writePositions(nLeft, nRight, nMid=nMid)
+    writePositions(nLeft, nRight, nMid=nMid, stepWidth=stepWidth)
     success = 0
     for i,bwFileName in enumerate(bigwigs):
         try:
