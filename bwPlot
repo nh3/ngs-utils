@@ -1,0 +1,259 @@
+#!/usr/bin/env python
+'''
+Usage: bwPlot line    [options] -o <outpdf> [<input>]                                                                                                   
+       bwPlot heatmap [options] -o <outpdf> [<input>]
+
+Common options:
+    -o <outpdf>     output pdf
+    -m <nMid>       number of middle data points [default: 0]
+    -c <colormap>   color map, "Set1" for line and "viridis" for heatmap as default [default: default]
+    <input>         input, read from stdin if omitted
+
+line options:
+    --size <WxH>    plot page size [default: 7x7]
+    --logy          Y axis in log scale
+    --normbg        background normalization
+
+heatmap options:
+    --nclust <N>    number of clusters for heatmap [default: 1]
+    --clm <method>  cluster method, using all samples (all) or specific
+                    samples (comma-separated 0-based idx) [default: 0]
+    --sort <idx>    sort data in decreasing order based on a single sample
+                    specified by a 0-based idx, -1 disable sorting [default: 0]
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+logging.basicConfig(
+        level=logging.WARN,
+        format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+        datefmt='%y-%m-%d %H:%M:%S')
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from sklearn.cluster import KMeans
+#import cProfile
+
+def get_colorMap(colorMap, l):
+    import matplotlib.cm
+    import matplotlib.colors
+    cm = plt.get_cmap(colorMap)
+    cNorm = matplotlib.colors.Normalize(vmin=0, vmax=l-1)
+    sm = matplotlib.cm.ScalarMappable(norm=cNorm, cmap=cm)
+    return sm
+
+def linePlot(names, positions, means, CIs, outpdf, nMid=0, colorMap='Set1', logY=False, pageSize=(7,7)):
+    sm = get_colorMap(colorMap, len(names))
+    fig = plt.figure(figsize=pageSize, dpi=120)
+    plt.axvline(x=0, lw=0.25, color='grey')
+    plt.axvline(x=nMid, lw=0.25, color='grey')
+    for i,name in enumerate(names):
+        col = sm.to_rgba(i)
+        plt.plot(positions, means[i], label=name, color=col, lw=1)
+        plt.fill_between(positions, means[i]-CIs[i], means[i]+CIs[i], facecolor=col, alpha=0.25)
+    plt.legend(loc='best', fontsize=7, framealpha=0.1)
+    plt.tick_params(labelsize=7)
+    if logY:
+        plt.yscale('log', basey=2)
+    pp = PdfPages(outpdf)
+    plt.savefig(pp, format='pdf')
+    pp.close()
+    return 0
+
+def heatmap(ax, data, x, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis'):
+    k_mid = np.logical_and(x>=0, x<=nMid)
+    im = ax.imshow(data, aspect='auto', extent=(x[0],x[-1],0,len(data)), cmap=colorMap)
+    ax.axvline(x=0, lw=0.25, color='black')
+    ax.axvline(x=nMid, lw=0.25, color='black')
+    for y in clstSep:
+        ax.axhline(y=y, lw=0.25, color='black')
+    return im
+
+def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis'):
+    l,n,m = data.shape
+    fig,ax = plt.subplots(nrows=1, ncols=l, sharey=True, figsize=(0.5+l*3,8))
+    for i,name in enumerate(names):
+        ax[i].set_ylabel(name)
+        im = heatmap(ax[i], data[i,rowOrder,:], positions, clstSep=clstSep, nMid=nMid, colorMap=colorMap)
+    fig.colorbar(im, ax=ax.tolist())
+    pp = PdfPages(outpdf)
+    pp.savefig(fig)
+    pp.close()
+    return 0
+
+def get_stats(data, l):
+    N,m = data.shape
+    if N > l*2:
+        from scipy.stats import t
+        from scipy.stats import sem
+        n = N/l
+        data = data.reshape(l,n,m)
+        means = np.nanmean(data, axis=1)
+        CIs = t.ppf(0.975,n-1)*sem(data, axis=1, nan_policy='omit')
+    else:
+        means = data[0::2]
+        CIs = data[1::2]
+    return means,CIs
+
+def normalize_background(data):
+    minx = np.nanmin(data, axis=1, keepdims=True)
+    endx = data[:,(0,-1)]
+    factor = np.nanmean(np.concatenate((minx,endx), axis=1), axis=1, keepdims=True)
+    data = data / factor
+    return data
+
+def kmeans_missing(X, n_clusters, max_iter=10):
+    """Perform K-Means clustering on data with missing values.
+    Args:
+      X: An [n_samples, n_features] array of data to cluster.
+      n_clusters: Number of clusters to form.
+      max_iter: Maximum number of EM iterations to perform.
+
+    Returns:
+      labels: An [n_samples] vector of integer labels.
+      centroids: An [n_clusters, n_features] array of cluster centroids.
+      X_hat: Copy of X with the missing values filled in.
+    """
+    # Initialize missing values to their column means
+    missing = ~np.isfinite(X)
+    mu = np.nanmean(X, 0, keepdims=1)
+    X_hat = np.where(missing, mu, X)
+
+    for i in xrange(max_iter):
+        if i > 0:
+            # initialize KMeans with the previous set of centroids. this is much
+            # faster and makes it easier to check convergence (since labels
+            # won't be permuted on every iteration), but might be more prone to
+            # getting stuck in local minima.
+            cls = KMeans(n_clusters, init=prev_centroids)
+        else:
+            # do multiple random initializations in parallel
+            cls = KMeans(n_clusters, n_jobs=-1)
+
+        # perform clustering on the filled-in data
+        labels = cls.fit_predict(X_hat)
+        centroids = cls.cluster_centers_
+
+        # fill in the missing values based on their cluster centroids
+        X_hat[missing] = centroids[labels][missing]
+
+        # when the labels have stopped changing then we have converged
+        if i > 0 and np.all(labels == prev_labels):
+            break
+
+        prev_labels = labels
+        prev_centroids = cls.cluster_centers_
+
+    return labels,centroids
+
+def get_cluster_id(data, nC, clstMethod='all'):
+    l,n,m = data.shape
+    if nC > 1:
+        if type(clstMethod) is np.ndarray:
+            sidebyside_data = np.concatenate(data[clstMethod], axis=1)
+        else:
+            sidebyside_data = np.concatenate(data, axis=1)
+        cidx,centroids = kmeans_missing(sidebyside_data, nC)
+    else:
+        cidx = np.zeros(n, dtype=int)
+    return cidx
+
+def get_order(data, k, clstIdx, sortIdx):
+    means = np.nanmean(data[sortIdx,:,k], axis=0).flatten()
+    rowValue = means + clstIdx * np.nanmax(means)
+    rowOrder = np.argsort(-rowValue)
+    return rowOrder
+
+def parse_WxH(WxH):
+    w,x,h = WxH.partition('x')
+    try:
+        w,h = int(w),int(h)
+    except:
+        raise ValueError('invalid --size value')
+    return w,h
+
+
+def parse_clstMethod(clm):
+    if not clm == 'all':
+        try:
+            clm = np.array(clm.split(','), dtype=int)
+        except:
+            raise ValueError('invalid --clm value')
+    return clm
+
+def open_input(filename=None):
+    if filename is None:
+        fh = sys.stdin
+    else:
+        if filename.endswith('.gz'):
+            import gzip
+            fh = gzip.open(filename, 'rb')
+        else:
+            fh = open(filename, 'r')
+    return fh
+
+def parse_data(data):
+    N,M = data.shape
+    positions = data[0,1:M].astype(int)
+    names,nidx = np.unique(data[1:N,0], return_index=True)
+    names = [data[1:N,0][i] for i in sorted(nidx)]
+    l,n,m = len(names),(N-1)/len(names),M-1
+    assert N-1 == l*n, 'incorrect <input> dimension'
+    dmat = data[1:N,1:M].astype(float)
+    return names,positions,dmat
+
+def main(args):
+    logging.info(args)
+    nMid = int(args['m'])
+    outPdf = args['o']
+    colorMap = args['c']
+    if args['line']:
+        if colorMap == 'default':
+            colorMap = 'Set1'
+        pageW,pageH = parse_WxH(args['size'])
+        logY = args['logy']
+        normBg = args['normbg']
+    elif args['heatmap']:
+        if colorMap == 'default':
+            colorMap = 'viridis'
+        nClust = int(args['nclust'])
+        clstMethod = parse_clstMethod(args['clm'])
+        sortIdx = int(args['sort'])
+    else:
+        raise Exception('Should not reach here')
+
+    infh = open_input(args['input'])
+    data = np.loadtxt(infh, dtype=str, delimiter='\t')
+    infh.close()
+    names,positions,dmat = parse_data(data)
+
+    if args['line']:
+        means,CIs = get_stats(dmat, len(names))
+        if normBg:
+            means = normalize_background(means)
+        linePlot(names, positions, means, CIs, outPdf, nMid=nMid, logY=logY, pageSize=(pageW,pageH), colorMap=colorMap)
+    elif args['heatmap']:
+        dmat = np.log1p(dmat)
+        N,m = dmat.shape
+        l,n = len(names),N/len(names)
+        dmat = dmat.reshape(l,n,m)
+        cidx = get_cluster_id(dmat, nClust, clstMethod=clstMethod)
+        k = np.logical_and(positions>=0, positions<=nMid)
+        rowOrder = get_order(dmat, k=k, clstIdx=cidx, sortIdx=sortIdx)
+        clstSep = np.where(np.diff(np.sort(cidx))>0)[0] + 1
+        heatmapPlot(names, positions, dmat, rowOrder, outPdf, nMid=nMid, clstSep=clstSep, colorMap=colorMap)
+    return 0
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)
