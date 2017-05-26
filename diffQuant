@@ -1,0 +1,82 @@
+#!/usr/bin/env Rscript
+'Usage: diffQuant [options] <countTable> <sampleTable>
+
+Arguments:
+    <countTable>        feature (row) by sample (column) table, first column gives feature names
+    <sampleTable>       one sample per row, first column gives sample names that match <countTable>\'s column names
+
+Options:
+    -o <file>           output filename prefix
+    --html              make html report(s), require package "ReportingTools"
+    --factor <str>      factor name [default: strain]
+    --ctrl <str>        control level [default: N2]
+    --trmt <str>        treatment level, provide a comma separated list if there are multiple levels to test againt control
+    --nCPU <int>        number of CPUs to use, require package "BiocParallel" [default: 1]
+' -> doc
+
+suppressWarnings(suppressMessages(library(docopt)))
+tryCatch(opts <- docopt(doc, strip_names=F), error=function(e) { message(doc); q() })
+names(opts) <- sub('^--?', '', names(opts))
+names(opts) <- gsub('[<>]', '', names(opts))
+
+condition <- opts[['factor']]
+ctrl <- opts[['ctrl']]
+nCPU <- as.integer(opts[['nCPU']])
+outprefix <- opts[['o']]
+outdir <- dirname(paste(outprefix, 'txt', sep='.'))
+
+suppressWarnings(suppressMessages(library(DESeq2)))
+
+export_result <- function(res, dds, outprefix, ctrl, trmt=NULL, doParallel=F, makeHTML=F) {
+    if (is.null(trmt)) trmt <- 'all'
+    testName <- sprintf('%s-vs-%s', ctrl, trmt)
+    cat(testName)
+    cat(summary(res, alph=0.05))
+    cat('\n')
+
+    resOrdered <- res[order(res$padj),]
+    outfile <- sprintf('%s.%s.txt', outprefix, testName)
+    write.table(as.data.frame(resOrdered), file=outfile, quote=F, sep='\t')
+
+    if (makeHTML) {
+        outdir <- dirname(outfile)
+        dqReport <- HTMLReport(shortName=testName, title=testName, reportDirectory=outdir)
+        publish(res, dqReport, DataSet=dds, factor=droplevels(dds$condition), pvalueCutoff=0.05, reportDir=outdir)
+        finish(dqReport)
+    }
+}
+
+dat <- read.delim(opts[['countTable']], header=T, stringsAsFactors=F, comment='#')
+mat <- as.matrix(dat[,-1])
+rownames(mat) <- dat[,1]
+
+sdat <- read.delim(opts[['sampleTable']], header=T, stringsAsFactors=F, comment='#')
+stopifnot(condition %in% colnames(sdat) && ctrl %in% sdat[[condition]])
+sdat$condition <- relevel(factor(sdat[[condition]]), ref=ctrl)
+
+dds <- DESeqDataSetFromMatrix(countData=mat, colData=sdat, design=~condition)
+
+packs <- rownames(installed.packages())
+doParallel <- nCPU > 1 && 'BiocParallel' %in% packs
+if (doParallel) {
+    suppressWarnings(suppressMessages(library(BiocParallel)))
+    register(MulticoreParam(nCPU))
+}
+makeHTML <- opts[['html']] && 'ReportingTools' %in% packs
+if (makeHTML) suppressWarnings(suppressMessages(library(ReportingTools)))
+
+dir.create(outdir, showWarnings=F)
+
+dds <- DESeq(dds, parallel=doParallel)
+if (is.null(opts[['trmt']])) {
+    res <- results(dds, addMLE=T, parallel=doParallel)
+    export_result(res, dds, outprefix, ctrl, NULL, doParallel, makeHTML)
+} else {
+    treatments <- unlist(strsplit(opts[['trmt']], ','))
+    for (trmt in treatments) {
+        contrast <- c('condition',ctrl,trmt)
+        res <- results(dds, contrast=contrast, addMLE=T, parallel=doParallel)
+        k <- sdat$condition %in% c(ctrl, trmt)
+        export_result(res, dds[,k], outprefix, ctrl, trmt, doParallel, makeHTML)
+    }
+}
