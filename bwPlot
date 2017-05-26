@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 '''
-Usage: bwPlot line    [options] -o <outpdf> [<input>]                                                                                                   
-       bwPlot heatmap [options] -o <outpdf> [<input>]
+Usage: bwPlot (line | heatmap) [options] -o <outpdf> [<input>]
 
 Common options:
     -o <outpdf>     output pdf
     -m <nMid>       number of middle data points [default: 0]
     -c <colormap>   color map, "Set1" for line and "viridis" for heatmap as default [default: default]
+    --xlim <xlim>   position range
+    --facet <N>     make multi facets plot, <N> bigwig per facet [default: 0]
     <input>         input, read from stdin if omitted
 
 line options:
@@ -195,7 +196,7 @@ def open_input(filename=None):
             fh = open(filename, 'r')
     return fh
 
-def parse_data(data):
+def parse_data(data, xlim=None):
     N,M = data.shape
     positions = data[0,1:M].astype(int)
     names,nidx = np.unique(data[1:N,0], return_index=True)
@@ -203,13 +204,24 @@ def parse_data(data):
     l,n,m = len(names),(N-1)/len(names),M-1
     assert N-1 == l*n, 'incorrect <input> dimension'
     dmat = data[1:N,1:M].astype(float)
+    if xlim is not None and len(xlim)==2:
+        k = np.logical_and(positions >= xlim[0], positions<= xlim[1])
+        positions = positions[k]
+        dmat = dmat[:,k]
     return names,positions,dmat
+
+def parse_xlim(xlim):
+    if xlim is None:
+        return None
+    else:
+        return map(int, xlim.split(','))
 
 def main(args):
     logging.info(args)
     nMid = int(args['m'])
     outPdf = args['o']
     colorMap = args['c']
+    xlim = parse_xlim(args['xlim'])
     if args['line']:
         if colorMap == 'default':
             colorMap = 'Set1'
@@ -228,7 +240,7 @@ def main(args):
     infh = open_input(args['input'])
     data = np.loadtxt(infh, dtype=str, delimiter='\t')
     infh.close()
-    names,positions,dmat = parse_data(data)
+    names,positions,dmat = parse_data(data, xlim=xlim)
 
     if args['line']:
         means,CIs = get_stats(dmat, len(names))
