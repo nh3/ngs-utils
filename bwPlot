@@ -14,13 +14,16 @@ line options:
     --size <WxH>    plot page size [default: 7x7]
     --logy          Y axis in log scale
     --normbg        background normalization
+    --showFC        print FC (max/min ratio)
 
 heatmap options:
-    --nclust <N>    number of clusters for heatmap [default: 1]
+    --nclust <N>    number of clusters for heatmap, output cluster id to stdout if > 1 [default: 1]
+    --seed <int>    specify random seed
     --clm <method>  cluster method, using all samples (all) or specific
                     samples (comma-separated 0-based idx) [default: 0]
     --sort <idx>    sort data in decreasing order based on a single sample
                     specified by a 0-based idx, -1 disable sorting [default: 0]
+    --sepZ          separate color scale for each bw input
 '''
 
 from __future__ import print_function
@@ -33,6 +36,8 @@ logging.basicConfig(
         format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
         datefmt='%y-%m-%d %H:%M:%S')
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.cluster import KMeans
@@ -70,16 +75,20 @@ def heatmap(ax, data, x, clstSep=np.array([], dtype=int), nMid=0, colorMap='viri
     ax.axvline(x=0, lw=0.25, color='black')
     ax.axvline(x=nMid, lw=0.25, color='black')
     for y in clstSep:
-        ax.axhline(y=y, lw=0.25, color='black')
+        ax.axhline(y=y, lw=0.5, color='white')
     return im
 
-def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis'):
+def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis', sepZ=False):
     l,n,m = data.shape
     fig,ax = plt.subplots(nrows=1, ncols=l, sharey=True, figsize=(0.5+l*3,8))
     for i,name in enumerate(names):
         ax[i].set_ylabel(name)
         im = heatmap(ax[i], data[i,rowOrder,:], positions, clstSep=clstSep, nMid=nMid, colorMap=colorMap)
-    fig.colorbar(im, ax=ax.tolist())
+        if sepZ:
+            logging.warn('using separate colorbar')
+            fig.colorbar(im, ax=ax[i])
+    if not sepZ:
+        fig.colorbar(im, ax=ax.tolist())
     pp = PdfPages(outpdf)
     pp.savefig(fig)
     pp.close()
@@ -106,7 +115,7 @@ def normalize_background(data):
     data = data / factor
     return data
 
-def kmeans_missing(X, n_clusters, max_iter=10):
+def kmeans_missing(X, n_clusters, max_iter=10, seed=None):
     """Perform K-Means clustering on data with missing values.
     Args:
       X: An [n_samples, n_features] array of data to cluster.
@@ -132,7 +141,9 @@ def kmeans_missing(X, n_clusters, max_iter=10):
             cls = KMeans(n_clusters, init=prev_centroids)
         else:
             # do multiple random initializations in parallel
-            cls = KMeans(n_clusters, n_jobs=-1)
+            if seed is not None:
+                logging.warning('using random seed: {}'.format(seed))
+            cls = KMeans(n_clusters, n_jobs=-1, random_state=seed)
 
         # perform clustering on the filled-in data
         labels = cls.fit_predict(X_hat)
@@ -150,14 +161,14 @@ def kmeans_missing(X, n_clusters, max_iter=10):
 
     return labels,centroids
 
-def get_cluster_id(data, nC, clstMethod='all'):
+def get_cluster_id(data, nC, clstMethod='all', seed=None):
     l,n,m = data.shape
     if nC > 1:
         if type(clstMethod) is np.ndarray:
             sidebyside_data = np.concatenate(data[clstMethod], axis=1)
         else:
             sidebyside_data = np.concatenate(data, axis=1)
-        cidx,centroids = kmeans_missing(sidebyside_data, nC)
+        cidx,centroids = kmeans_missing(sidebyside_data, nC, seed=seed)
     else:
         cidx = np.zeros(n, dtype=int)
     return cidx
@@ -187,20 +198,20 @@ def parse_clstMethod(clm):
 
 def open_input(filename=None):
     if filename is None:
-        fh = sys.stdin
+        fh = getattr(sys.stdin, 'buffer', sys.stdin)
     else:
         if filename.endswith('.gz'):
             import gzip
             fh = gzip.open(filename, 'rb')
         else:
-            fh = open(filename, 'r')
+            fh = open(filename, 'rb')
     return fh
 
 def parse_data(data, xlim=None):
     N,M = data.shape
     positions = data[0,1:M].astype(int)
     names,nidx = np.unique(data[1:N,0], return_index=True)
-    names = [data[1:N,0][i] for i in sorted(nidx)]
+    names = [data[1:N,0][i].decode('utf-8') for i in sorted(nidx)]
     l,n,m = len(names),(N-1)/len(names),M-1
     assert N-1 == l*n, 'incorrect <input> dimension'
     dmat = data[1:N,1:M].astype(float)
@@ -216,6 +227,15 @@ def parse_xlim(xlim):
     else:
         return map(int, xlim.split(','))
 
+def calcFC(means):
+    M = means.max(axis=1)
+    m = means.min(axis=1)
+    return M/m
+
+def appendNameWithFC(names, FC):
+    return ['{} | {:.2f}'.format(nm,fc) for nm,fc in list(zip(names, FC))]
+
+
 def main(args):
     logging.info(args)
     nMid = int(args['m'])
@@ -228,17 +248,22 @@ def main(args):
         pageW,pageH = parse_WxH(args['size'])
         logY = args['logy']
         normBg = args['normbg']
+        showFC = bool(args['showFC'])
     elif args['heatmap']:
         if colorMap == 'default':
             colorMap = 'viridis'
         nClust = int(args['nclust'])
         clstMethod = parse_clstMethod(args['clm'])
         sortIdx = int(args['sort'])
+        sepZ = bool(args['sepZ'])
+        seed = args['seed']
+        if seed is not None:
+            seed = int(seed)
     else:
         raise Exception('Should not reach here')
 
     infh = open_input(args['input'])
-    data = np.loadtxt(infh, dtype=str, delimiter='\t')
+    data = np.loadtxt(infh, dtype=bytes, delimiter='\t')
     infh.close()
     names,positions,dmat = parse_data(data, xlim=xlim)
 
@@ -246,17 +271,21 @@ def main(args):
         means,CIs = get_stats(dmat, len(names))
         if normBg:
             means = normalize_background(means)
+        if showFC:
+            names = appendNameWithFC(names, calcFC(means))
         linePlot(names, positions, means, CIs, outPdf, nMid=nMid, logY=logY, pageSize=(pageW,pageH), colorMap=colorMap)
     elif args['heatmap']:
         dmat = np.log1p(dmat)
         N,m = dmat.shape
         l,n = len(names),N/len(names)
         dmat = dmat.reshape(l,n,m)
-        cidx = get_cluster_id(dmat, nClust, clstMethod=clstMethod)
+        cidx = get_cluster_id(dmat, nClust, clstMethod=clstMethod, seed=seed)
+        if nClust > 1:
+            np.savetxt(sys.stdout,cidx,fmt='%d')
         k = np.logical_and(positions>=0, positions<=nMid)
         rowOrder = get_order(dmat, k=k, clstIdx=cidx, sortIdx=sortIdx)
         clstSep = np.where(np.diff(np.sort(cidx))>0)[0] + 1
-        heatmapPlot(names, positions, dmat, rowOrder, outPdf, nMid=nMid, clstSep=clstSep, colorMap=colorMap)
+        heatmapPlot(names, positions, dmat, rowOrder, outPdf, nMid=nMid, clstSep=clstSep, colorMap=colorMap, sepZ=sepZ)
     return 0
 
 
