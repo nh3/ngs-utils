@@ -8,12 +8,13 @@ Common options:
     -c <colormap>   color map, "Set1" for line and "viridis" for heatmap as default [default: default]
     --xlim <xlim>   position range
     --facet <N>     make multi facets plot, <N> bigwig per facet [default: 0]
+    --log           convert coverage to log scale
     <input>         input, read from stdin if omitted
 
 line options:
     --size <WxH>    plot page size [default: 7x7]
-    --logy          Y axis in log scale
-    --normbg        background normalization
+    --normbg        background normalization by division
+    --normbg2       background normalization by subtraction
     --showFC        print FC (max/min ratio)
 
 heatmap options:
@@ -21,8 +22,10 @@ heatmap options:
     --seed <int>    specify random seed
     --clm <method>  cluster method, using all samples (all) or specific
                     samples (comma-separated 0-based idx) [default: 0]
+    --saveCl <fn>   save cluster id to file
     --sort <idx>    sort data in decreasing order based on a single sample
                     specified by a 0-based idx, -1 disable sorting [default: 0]
+    --cRange <m,M>  percentile of data for color mapping, [default: 1,99]
     --sepZ          separate color scale for each bw input
 '''
 
@@ -69,8 +72,11 @@ def linePlot(names, positions, means, CIs, outpdf, nMid=0, colorMap='Set1', logY
     pp.close()
     return 0
 
-def heatmap(ax, data, x, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis'):
+def heatmap(ax, data, x, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis', colorPercentile=(1,99)):
     k_mid = np.logical_and(x>=0, x<=nMid)
+    cutoff = np.nanpercentile(data, colorPercentile)
+    data[data < cutoff[0]] = cutoff[0] 
+    data[data > cutoff[1]] = cutoff[1] 
     im = ax.imshow(data, aspect='auto', extent=(x[0],x[-1],0,len(data)), cmap=colorMap)
     ax.axvline(x=0, lw=0.25, color='black')
     ax.axvline(x=nMid, lw=0.25, color='black')
@@ -78,17 +84,17 @@ def heatmap(ax, data, x, clstSep=np.array([], dtype=int), nMid=0, colorMap='viri
         ax.axhline(y=y, lw=0.5, color='white')
     return im
 
-def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis', sepZ=False):
+def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis', colorPercentile=(1,99), sepZ=False):
     l,n,m = data.shape
-    fig,ax = plt.subplots(nrows=1, ncols=l, sharey=True, figsize=(0.5+l*3,8))
+    fig,ax = plt.subplots(nrows=1, ncols=l, sharey=True, squeeze=False, figsize=(0.5+l*3,8))
     for i,name in enumerate(names):
-        ax[i].set_ylabel(name)
-        im = heatmap(ax[i], data[i,rowOrder,:], positions, clstSep=clstSep, nMid=nMid, colorMap=colorMap)
+        ax[0,i].set_ylabel(name)
+        im = heatmap(ax[0,i], data[i,rowOrder,:], positions, clstSep=clstSep, nMid=nMid, colorMap=colorMap, colorPercentile=colorPercentile)
         if sepZ:
-            logging.warn('using separate colorbar')
-            fig.colorbar(im, ax=ax[i])
+            logging.info('using separate colorbar')
+            fig.colorbar(im, ax=ax[0,i])
     if not sepZ:
-        fig.colorbar(im, ax=ax.tolist())
+        fig.colorbar(im, ax=ax[0].tolist())
     pp = PdfPages(outpdf)
     pp.savefig(fig)
     pp.close()
@@ -108,12 +114,16 @@ def get_stats(data, l):
         CIs = data[1::2]
     return means,CIs
 
-def normalize_background(data):
-    minx = np.nanmin(data, axis=1, keepdims=True)
-    endx = data[:,(0,-1)]
+def normalize_background(means, CIs, method='division'):
+    minx = np.nanmin(means, axis=1, keepdims=True)
+    endx = means[:,(0,-1)]
     factor = np.nanmean(np.concatenate((minx,endx), axis=1), axis=1, keepdims=True)
-    data = data / factor
-    return data
+    if method == 'division':
+        means = means / factor
+        CIs = CIs / factor
+    elif method == 'subtraction':
+        means = means - minx
+    return means,CIs
 
 def kmeans_missing(X, n_clusters, max_iter=10, seed=None):
     """Perform K-Means clustering on data with missing values.
@@ -196,6 +206,16 @@ def parse_clstMethod(clm):
             raise ValueError('invalid --clm value')
     return clm
 
+
+def parse_percentile_range(s):
+    try:
+        x = map(float, s.split(','))
+        assert len(x) == 2
+        assert x[0] < x[1] and x[0] >= 0 and x[1] <= 100
+    except:
+        raise ValueError('invalid --cRange value')
+    return x
+
 def open_input(filename=None):
     if filename is None:
         fh = getattr(sys.stdin, 'buffer', sys.stdin)
@@ -242,20 +262,23 @@ def main(args):
     outPdf = args['o']
     colorMap = args['c']
     xlim = parse_xlim(args['xlim'])
+    logY = args['log']
     if args['line']:
         if colorMap == 'default':
             colorMap = 'Set1'
         pageW,pageH = parse_WxH(args['size'])
-        logY = args['logy']
         normBg = args['normbg']
+        normBg2 = args['normbg2']
         showFC = bool(args['showFC'])
     elif args['heatmap']:
         if colorMap == 'default':
             colorMap = 'viridis'
         nClust = int(args['nclust'])
         clstMethod = parse_clstMethod(args['clm'])
+        clstOutput = args['saveCl']
         sortIdx = int(args['sort'])
         sepZ = bool(args['sepZ'])
+        cRange = parse_percentile_range(args['cRange'])
         seed = args['seed']
         if seed is not None:
             seed = int(seed)
@@ -270,22 +293,25 @@ def main(args):
     if args['line']:
         means,CIs = get_stats(dmat, len(names))
         if normBg:
-            means = normalize_background(means)
+            means,CIs = normalize_background(means, CIs, method='division')
+        elif normBg2:
+            means,CIs = normalize_background(means, CIs, method='subtraction')
         if showFC:
             names = appendNameWithFC(names, calcFC(means))
         linePlot(names, positions, means, CIs, outPdf, nMid=nMid, logY=logY, pageSize=(pageW,pageH), colorMap=colorMap)
     elif args['heatmap']:
-        dmat = np.log1p(dmat)
+        if logY:
+            dmat = np.log1p(dmat)
         N,m = dmat.shape
         l,n = len(names),N/len(names)
         dmat = dmat.reshape(l,n,m)
         cidx = get_cluster_id(dmat, nClust, clstMethod=clstMethod, seed=seed)
-        if nClust > 1:
-            np.savetxt(sys.stdout,cidx,fmt='%d')
+        if nClust > 1 and clstOutput:
+            np.savetxt(clstOutput, cidx, fmt='%d')
         k = np.logical_and(positions>=0, positions<=nMid)
         rowOrder = get_order(dmat, k=k, clstIdx=cidx, sortIdx=sortIdx)
         clstSep = np.where(np.diff(np.sort(cidx))>0)[0] + 1
-        heatmapPlot(names, positions, dmat, rowOrder, outPdf, nMid=nMid, clstSep=clstSep, colorMap=colorMap, sepZ=sepZ)
+        heatmapPlot(names, positions, dmat, rowOrder, outPdf, nMid=nMid, clstSep=clstSep, colorMap=colorMap, colorPercentile=cRange, sepZ=sepZ)
     return 0
 
 
