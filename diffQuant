@@ -6,7 +6,7 @@ Arguments:
     <sampleTable>       one sample per row, first column gives sample names that match <countTable>\'s column names
 
 Options:
-    -o <file>           output filename prefix
+    -o <file>           output filename prefix [default: ]
     --html              make html report(s), require package "ReportingTools"
     --factor <str>      factor name [default: strain]
     --ctrl <str>        control level [default: N2]
@@ -27,15 +27,20 @@ outdir <- dirname(paste(outprefix, 'txt', sep='.'))
 
 suppressWarnings(suppressMessages(library(DESeq2)))
 
+export_normCounts <- function(dds, outprefix) {
+    outfile <- ifelse(outprefix=='', 'normCounts.txt', sprintf('%s.normCounts.txt', outprefix))
+    write.table(as.data.frame(counts(dds, norm=T)), file=outfile, quote=F, sep='\t')
+}
+
 export_result <- function(res, dds, outprefix, ctrl, trmt=NULL, doParallel=F, makeHTML=F) {
     if (is.null(trmt)) trmt <- 'all'
-    testName <- sprintf('%s-vs-%s', ctrl, trmt)
+    testName <- sprintf('%s-vs-%s', trmt, ctrl)
     cat(testName)
     cat(summary(res, alph=0.05))
     cat('\n')
 
     resOrdered <- res[order(res$padj),]
-    outfile <- sprintf('%s.%s.txt', outprefix, testName)
+    outfile <- ifelse(outprefix=='', sprintf('%s.txt', testName), sprintf('%s.%s.txt', outprefix, testName))
     write.table(as.data.frame(resOrdered), file=outfile, quote=F, sep='\t')
 
     if (makeHTML) {
@@ -68,13 +73,14 @@ if (makeHTML) suppressWarnings(suppressMessages(library(ReportingTools)))
 dir.create(outdir, showWarnings=F)
 
 dds <- DESeq(dds, parallel=doParallel)
+export_normCounts(dds, outprefix)
 if (is.null(opts[['trmt']])) {
     res <- results(dds, addMLE=T, parallel=doParallel)
     export_result(res, dds, outprefix, ctrl, NULL, doParallel, makeHTML)
 } else {
     treatments <- unlist(strsplit(opts[['trmt']], ','))
     for (trmt in treatments) {
-        contrast <- c('condition',ctrl,trmt)
+        contrast <- c('condition',trmt,ctrl)
         res <- results(dds, contrast=contrast, addMLE=T, parallel=doParallel)
         k <- sdat$condition %in% c(ctrl, trmt)
         export_result(res, dds[,k], outprefix, ctrl, trmt, doParallel, makeHTML)
