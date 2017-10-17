@@ -2,7 +2,7 @@
 '''
 Extract and calculate coverage stats at a list of locations from bigwigs
 
-Usage: bwCov [-b <bed>] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [--ignstr] [--fillzero] [--full] <bigwig>...
+Usage: bwCov [-b <bed>] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [--mode <mode>] [--ignstr] [--fillzero] [--full] <bigwig>...
 
 Options:
     <bigwig>        input BigWig
@@ -11,6 +11,7 @@ Options:
     -l <left>       number of data points to the left [default: 0]
     -r <right>      number of data points to the right [default: 0]
     -m <mid>        number of data points inside the interval [default: 0]
+    --mode <mode>   feature mode, 5p/3p/mid, default is to use whole length
     --fillzero      fill zero where there is no data
     --ignstr        ignore strand information from the input BED
     --full          print full value table rather than stats (mean,2.5pct,median,97.5pct)
@@ -26,6 +27,7 @@ logging.basicConfig(
         format='%(asctime)s; %(levelname)s; %(funcName)s() %(message)s',
         datefmt='%y-%m-%d %H:%M:%S')
 import os.path
+import copy
 import pyBigWig
 import numpy as np
 from scipy.stats import sem
@@ -39,6 +41,33 @@ class GenomicFeature(object):
         self.name = name
         self.size = end - start
         self.strand = strand
+
+    def get5p(self):
+        new = copy.copy(self)
+        if self.strand == '-':
+            new.start = new.end-1
+        else:
+            new.end = new.start+1
+        new.size = 1
+        return new
+
+    def get3p(self):
+        new = copy.copy(self)
+        if self.strand == '-':
+            new.end = new.start+1
+        else:
+            new.start = new.end-1
+        new.size = 1
+        return new
+
+    def getMid(self):
+        new = copy.copy(self)
+        m = int((new.start + new.end)/2)
+        new.start = m
+        new.end = m+1
+        new.size = 1
+        return new
+
 
 class IntervalBoundary(object):
     def __init__(self, chrom, start, end, strand, stepWidth, leftStep, rightStep, midStep=0):
@@ -69,6 +98,7 @@ class IntervalBoundary(object):
             x[nLeftMid:(nLeftMid+self.rightStep)] = np.nanmean(bwData[self.chrom][self.rightMid:self.rightMost].reshape((self.rightStep,self.stepWidth)), axis=1)
         return x
 
+
 def readBed(filename, chromSize, ignoreStrand=False):
     if filename is None:
         stream = sys.stdin
@@ -81,6 +111,8 @@ def readBed(filename, chromSize, ignoreStrand=False):
         chrom = fields[0]
         start = int(fields[1])
         end = int(fields[2])
+        if chrom not in chromSize:
+            continue
         if nf < 4:
             name = '{0}:{1}-{2}'.format(*fields)
             strand = '+'
@@ -96,6 +128,7 @@ def readBed(filename, chromSize, ignoreStrand=False):
     logging.info('done')
     return features
 
+
 def cacheBW(filename):
     bw = pyBigWig.open(filename)
     chromSize = bw.chroms()
@@ -105,11 +138,13 @@ def cacheBW(filename):
     logging.info('{} cached using {}MB of memory'.format(filename, nMB))
     return bwData
 
+
 def getChromSizeFromBW(filename):
     bw = pyBigWig.open(filename)
     chromSize = bw.chroms()
     bw.close()
     return chromSize
+
 
 def calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight=None, nMid=0):
     if nRight is None:
@@ -142,6 +177,7 @@ def calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight=None, nM
     logging.info('done')
     return intervals
 
+
 def extractBigWigValues(bwData, intervals, nLeft, nRight, nMid=0, fillZero=False):
     n = len(intervals)
     m = nLeft + nRight + nMid
@@ -155,9 +191,12 @@ def extractBigWigValues(bwData, intervals, nLeft, nRight, nMid=0, fillZero=False
     logging.info('done')
     return data
 
+
 def writePositions(nLeft, nRight, nMid=0, stepWidth=10, fh=sys.stdout):
     m = nLeft + nRight + nMid
+    fh = getattr(fh, 'buffer', fh)
     np.savetxt(fh, np.hstack(('position', np.arange(-nLeft, nMid+nRight, dtype=int)*stepWidth)).reshape((1,m+1)), fmt='%s', delimiter='\t')
+
 
 def writeStats(name, data, fh=sys.stdout, full=False):
     if full:
@@ -169,6 +208,7 @@ def writeStats(name, data, fh=sys.stdout, full=False):
     N = len(stats)
     nameColumn = np.array([name]*N).reshape(N,1)
     outdat = np.hstack((nameColumn, stats))
+    fh = getattr(fh, 'buffer', fh)
     np.savetxt(fh, outdat, fmt='%s', delimiter='\t')
     return 0
 
@@ -182,6 +222,15 @@ def main(args):
 
     chromSize = getChromSizeFromBW(bigwigs[0])
     features = readBed(inputBed, chromSize, ignoreStrand=args['ignstr'])
+    if args['mode'] is not None:
+        if args['mode'] == 'mid':
+            features = [f.getMid() for f in features]
+        elif args['mode'] == '5p':
+            features = [f.get5p() for f in features]
+        elif args['mode'] == '3p':
+            features = [f.get3p() for f in features]
+        else:
+            raise ValueError('unrecognised <mode>')
     intervals = calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight, nMid)
     n = len(intervals)
 
