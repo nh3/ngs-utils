@@ -2,7 +2,7 @@
 '''
 Extract and calculate coverage stats at a list of locations from bigwigs
 
-Usage: bwCov [-b <bed>] [-w <stepWidth>] [-l <left>] [-r <right>] [-m <mid>] [--mode <mode>] [--ignstr] [--fillzero] [--full] <bigwig>...
+Usage: bwCov -b <bed> [options] <bigwig>...
 
 Options:
     <bigwig>        input BigWig
@@ -14,6 +14,7 @@ Options:
     --mode <mode>   feature mode, 5p/3p/mid, default is to use whole length
     --fillzero      fill zero where there is no data
     --ignstr        ignore strand information from the input BED
+    --grpidx        specify group column index (1-based) in input BED
     --full          print full value table rather than stats (mean,2.5pct,median,97.5pct)
 '''
 
@@ -99,12 +100,12 @@ class IntervalBoundary(object):
         return x
 
 
-def readBed(filename, chromSize, ignoreStrand=False):
+def readBed(filename, chromSize, ignoreStrand=False, groupIdx=False):
     if filename is None:
         stream = sys.stdin
     else:
         stream = open(filename)
-    features = []
+    features,clusters = [],[]
     for line in stream:
         fields = line.rstrip().split()
         nf = len(fields)
@@ -125,8 +126,13 @@ def readBed(filename, chromSize, ignoreStrand=False):
         start = min(max(0, start), chromSize[chrom])
         end = min(max(0, end), chromSize[chrom])
         features.append(GenomicFeature(chrom,start,end,name,strand))
+        if groupIdx:
+            cid = fields[groupIdx+1]
+            clusters.append(cid)
+        else:
+            clusters.append(1)
     logging.info('done')
-    return features
+    return features,clusters
 
 
 def cacheBW(filename):
@@ -219,9 +225,12 @@ def main(args):
     bigwigs = args['bigwig']
     inputBed = args['b']
     stepWidth,nLeft,nRight,nMid = int(args['w']),int(args['l']),int(args['r']),int(args['m'])
+    groupIdx = args['grpidx']
+    if groupIdx:
+        groupIdx = int(args['grpidx'])
 
     chromSize = getChromSizeFromBW(bigwigs[0])
-    features = readBed(inputBed, chromSize, ignoreStrand=args['ignstr'])
+    features,clusters = readBed(inputBed, chromSize, ignoreStrand=args['ignstr'], groupIdx=groupIdx)
     if args['mode'] is not None:
         if args['mode'] == 'mid':
             features = [f.getMid() for f in features]
@@ -240,11 +249,16 @@ def main(args):
         try:
             bwData = cacheBW(bwFileName)
             data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
-        except:
+        except Exception, e:
             logging.ERROR('failed to get values from {}'.format(bwFileName))
             continue
         name = os.path.splitext(os.path.basename(bwFileName))[0]
-        writeStats(name, data, full=args['full'])
+        if len(set(clusters)) == 1:
+            writeStats(name, data, full=args['full'])
+        else:
+            for cid in sorted(set(clusters)):
+                k = np.array(clusters) == cid
+                writeStats('{}_{}'.format(name, cid), data[k], full=args['full'])
         success += 1
     logging.info('{}/{} done successfully'.format(success, len(bigwigs)))
     return 0
