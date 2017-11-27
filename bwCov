@@ -14,7 +14,7 @@ Options:
     --mode <mode>   feature mode, 5p/3p/mid, default is to use whole length
     --fillzero      fill zero where there is no data
     --ignstr        ignore strand information from the input BED
-    --grpidx        specify group column index (1-based) in input BED
+    --grpidx <int>  specify group column index (1-based) in input BED
     --full          print full value table rather than stats (mean,2.5pct,median,97.5pct)
 '''
 
@@ -80,7 +80,7 @@ class IntervalBoundary(object):
         self.leftStep = leftStep
         self.rightStep = rightStep
         self.midStep = midStep
-        self.leftMost = start - stepWidth*leftStep
+        self.leftMost = max(0, start - stepWidth*leftStep)
         self.rightMost = end + stepWidth*rightStep
 
     def __str__(self):
@@ -92,11 +92,19 @@ class IntervalBoundary(object):
         if not fillZero:
             x = x * np.nan
         if self.leftStep>0:
-            x[(nLeft-self.leftStep):nLeft] = np.nanmean(bwData[self.chrom][self.leftMost:self.leftMid].reshape((self.leftStep,self.stepWidth)), axis=1)
+            leftSize = self.stepWidth*self.leftStep
+            y = np.zeros(leftSize)
+            z = bwData[self.chrom][self.leftMost:self.leftMid]
+            y[(leftSize-z.size):leftSize] = z
+            x[(nLeft-self.leftStep):nLeft] = np.nanmean(y.reshape((self.leftStep,self.stepWidth)), axis=1)
         if nMid>0:
             x[nLeft:nLeftMid] = bwData[self.chrom][np.linspace(self.leftMid, self.rightMid-1, nMid, dtype=int)]
         if self.rightStep>0:
-            x[nLeftMid:(nLeftMid+self.rightStep)] = np.nanmean(bwData[self.chrom][self.rightMid:self.rightMost].reshape((self.rightStep,self.stepWidth)), axis=1)
+            rightSize = self.stepWidth*self.rightStep
+            y = np.zeros(rightSize)
+            z = bwData[self.chrom][self.rightMid:self.rightMost]
+            y[0:z.size] = z
+            x[nLeftMid:(nLeftMid+self.rightStep)] = np.nanmean(y.reshape((self.rightStep,self.stepWidth)), axis=1)
         return x
 
 
@@ -127,7 +135,7 @@ def readBed(filename, chromSize, ignoreStrand=False, groupIdx=False):
         end = min(max(0, end), chromSize[chrom])
         features.append(GenomicFeature(chrom,start,end,name,strand))
         if groupIdx:
-            cid = fields[groupIdx+1]
+            cid = fields[groupIdx]
             clusters.append(cid)
         else:
             clusters.append(1)
@@ -227,7 +235,7 @@ def main(args):
     stepWidth,nLeft,nRight,nMid = int(args['w']),int(args['l']),int(args['r']),int(args['m'])
     groupIdx = args['grpidx']
     if groupIdx:
-        groupIdx = int(args['grpidx'])
+        groupIdx = int(args['grpidx']) - 1
 
     chromSize = getChromSizeFromBW(bigwigs[0])
     features,clusters = readBed(inputBed, chromSize, ignoreStrand=args['ignstr'], groupIdx=groupIdx)
@@ -246,12 +254,14 @@ def main(args):
     writePositions(nLeft, nRight, nMid=nMid, stepWidth=stepWidth)
     success = 0
     for i,bwFileName in enumerate(bigwigs):
-        try:
-            bwData = cacheBW(bwFileName)
-            data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
-        except Exception, e:
-            logging.ERROR('failed to get values from {}'.format(bwFileName))
-            continue
+        bwData = cacheBW(bwFileName)
+        data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
+        #try:
+        #    bwData = cacheBW(bwFileName)
+        #    data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
+        #except Exception, e:
+        #    logging.ERROR('failed to get values from {}'.format(bwFileName))
+        #    continue
         name = os.path.splitext(os.path.basename(bwFileName))[0]
         if len(set(clusters)) == 1:
             writeStats(name, data, full=args['full'])
