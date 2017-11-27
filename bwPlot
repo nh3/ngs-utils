@@ -5,6 +5,7 @@ Usage: bwPlot (line | heatmap) [options] -o <outpdf> [<input>]
 Common options:
     -o <outpdf>     output pdf
     -m <nMid>       number of middle data points [default: 0]
+    -s <step>       step size [default: 10]
     -c <colormap>   color map, "Set1" for line and "viridis" for heatmap as default [default: default]
     --xlim <xlim>   position range
     --facet <N>     make multi facets plot, <N> bigwig per facet [default: 0]
@@ -54,16 +55,16 @@ def get_colorMap(colorMap, l):
     sm = matplotlib.cm.ScalarMappable(norm=cNorm, cmap=cm)
     return sm
 
-def linePlot(names, positions, means, CIs, outpdf, nMid=0, colorMap='Set1', logY=False, pageSize=(7,7)):
+def linePlot(names, positions, means, CIs, outpdf, nMid=0, step=10, colorMap='Set1', logY=False, pageSize=(7,7)):
     sm = get_colorMap(colorMap, len(names))
     fig = plt.figure(figsize=pageSize, dpi=120)
     plt.axvline(x=0, lw=0.25, color='grey')
-    plt.axvline(x=nMid, lw=0.25, color='grey')
+    plt.axvline(x=nMid*step, lw=0.25, color='grey')
     for i,name in enumerate(names):
         col = sm.to_rgba(i)
         plt.plot(positions, means[i], label=name, color=col, lw=1)
         plt.fill_between(positions, means[i]-CIs[i], means[i]+CIs[i], facecolor=col, alpha=0.25)
-    plt.legend(loc='best', fontsize=7, framealpha=0.1)
+    plt.legend(loc='best', fontsize=5, framealpha=0.1)
     plt.tick_params(labelsize=7)
     if logY:
         plt.yscale('log', basey=2)
@@ -72,24 +73,24 @@ def linePlot(names, positions, means, CIs, outpdf, nMid=0, colorMap='Set1', logY
     pp.close()
     return 0
 
-def heatmap(ax, data, x, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis', colorPercentile=(1,99)):
+def heatmap(ax, data, x, clstSep=np.array([], dtype=int), nMid=0, step=10, colorMap='viridis', colorPercentile=(1,99)):
     k_mid = np.logical_and(x>=0, x<=nMid)
     cutoff = np.nanpercentile(data, colorPercentile)
     data[data < cutoff[0]] = cutoff[0] 
     data[data > cutoff[1]] = cutoff[1] 
     im = ax.imshow(data, aspect='auto', extent=(x[0],x[-1],0,len(data)), cmap=colorMap)
     ax.axvline(x=0, lw=0.25, color='black')
-    ax.axvline(x=nMid, lw=0.25, color='black')
+    ax.axvline(x=nMid*step, lw=0.25, color='black')
     for y in clstSep:
         ax.axhline(y=y, lw=0.5, color='white')
     return im
 
-def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], dtype=int), nMid=0, colorMap='viridis', colorPercentile=(1,99), sepZ=False):
+def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], dtype=int), nMid=0, step=10, colorMap='viridis', colorPercentile=(1,99), sepZ=False):
     l,n,m = data.shape
     fig,ax = plt.subplots(nrows=1, ncols=l, sharey=True, squeeze=False, figsize=(0.5+l*3,8))
     for i,name in enumerate(names):
         ax[0,i].set_ylabel(name)
-        im = heatmap(ax[0,i], data[i,rowOrder,:], positions, clstSep=clstSep, nMid=nMid, colorMap=colorMap, colorPercentile=colorPercentile)
+        im = heatmap(ax[0,i], data[i,rowOrder,:], positions, clstSep=clstSep, nMid=nMid, step=step, colorMap=colorMap, colorPercentile=colorPercentile)
         if sepZ:
             logging.info('using separate colorbar')
             fig.colorbar(im, ax=ax[0,i])
@@ -122,7 +123,7 @@ def normalize_background(means, CIs, method='division'):
         means = means / factor
         CIs = CIs / factor
     elif method == 'subtraction':
-        means = means - minx
+        means = means - minx + 1
     return means,CIs
 
 def kmeans_missing(X, n_clusters, max_iter=10, seed=None):
@@ -259,6 +260,7 @@ def appendNameWithFC(names, FC):
 def main(args):
     logging.info(args)
     nMid = int(args['m'])
+    step = int(args['s'])
     outPdf = args['o']
     colorMap = args['c']
     xlim = parse_xlim(args['xlim'])
@@ -298,7 +300,7 @@ def main(args):
             means,CIs = normalize_background(means, CIs, method='subtraction')
         if showFC:
             names = appendNameWithFC(names, calcFC(means))
-        linePlot(names, positions, means, CIs, outPdf, nMid=nMid, logY=logY, pageSize=(pageW,pageH), colorMap=colorMap)
+        linePlot(names, positions, means, CIs, outPdf, nMid=nMid, step=step, logY=logY, pageSize=(pageW,pageH), colorMap=colorMap)
     elif args['heatmap']:
         if logY:
             dmat = np.log1p(dmat)
@@ -308,10 +310,10 @@ def main(args):
         cidx = get_cluster_id(dmat, nClust, clstMethod=clstMethod, seed=seed)
         if nClust > 1 and clstOutput:
             np.savetxt(clstOutput, cidx, fmt='%d')
-        k = np.logical_and(positions>=0, positions<=nMid)
+        k = np.logical_and(positions>=0, positions<=nMid*step)
         rowOrder = get_order(dmat, k=k, clstIdx=cidx, sortIdx=sortIdx)
         clstSep = np.where(np.diff(np.sort(cidx))>0)[0] + 1
-        heatmapPlot(names, positions, dmat, rowOrder, outPdf, nMid=nMid, clstSep=clstSep, colorMap=colorMap, colorPercentile=cRange, sepZ=sepZ)
+        heatmapPlot(names, positions, dmat, rowOrder, outPdf, nMid=nMid, step=step, clstSep=clstSep, colorMap=colorMap, colorPercentile=cRange, sepZ=sepZ)
     return 0
 
 
