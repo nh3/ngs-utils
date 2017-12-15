@@ -1,0 +1,49 @@
+#!/usr/bin/env python
+'''
+Usage: pyUtilTemplate [<input>]
+
+Options:
+    <input>     input, read from stdin if omitted
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+def main(args):
+    logging.info(args)
+    if args['input'] is None:
+        stream = sys.stdin
+    else:
+        stream = open(args['input'], 'r')
+    for line in stream:
+        if line[0] == '#':
+            continue
+        c,s,e = line.rstrip().split('\t')
+        print('{}\t{}\t{}\t{}:{}-{}\t{}\t.'.format(c,s,e,c,s,e,int(e)-int(s)))
+    stream.close()
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        if args.get('debug'):
+            logLevel = logging.DEBUG
+        else:
+            logLevel = logging.WARN
+        logging.basicConfig(
+                level=logLevel,
+                format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+                datefmt='%y-%m-%d %H:%M:%S')
+        if args.get('prof'):
+            import cProfile
+            cProfile.run('main(args)')
+        else:
+            main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)

@@ -1,0 +1,73 @@
+#!/usr/bin/env python
+'''
+Usage: bed2bw [options] -c <chrLen> -o <output> <input>
+
+Options:
+    -c <chrLen>     chromosome sizes
+    -x <extra>      extra options passed to `bedtools genomecov` [default: ]
+    --fill          fill zero where there is no data
+    -o <output>     output BW file
+    <input>         input BED file
+'''
+
+from __future__ import print_function
+import sys
+import signal
+import logging
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+import os
+import tempfile
+import subprocess as sbp
+
+def main(args):
+    logging.info(args)
+    bedFn = args['input']
+    chrFn = args['c']
+    extraOpt = args['x']
+    bwFn = args['o']
+    fill = args['fill']
+
+    bdgFh,bdgFn = tempfile.mkstemp()
+    if fill:
+        bgOpt = '-bga'
+    else:
+        bgOpt = '-bg'
+
+    cmd1 = 'bedtools genomecov -i {bedFn} -g {chrFn} {bgOpt} {extraOpt} > {bdgFn}'.format(
+            bedFn=bedFn, chrFn=chrFn, bgOpt=bgOpt, extraOpt=extraOpt, bdgFn=bdgFn)
+    sbp.check_call(cmd1, shell=True, executable='/bin/bash')
+
+    cmd2 = 'bedGraphToBigWig {bdgFn} {chrFn} {bwFn}'.format(bdgFn=bdgFn, chrFn=chrFn, bwFn=bwFn)
+    try:
+        sbp.check_call(cmd2, shell=True, executable='/bin/bash')
+    except CalledProcessError as e:
+        raise(e)
+    finally:
+        os.remove(bdgFn)
+
+    logging.info('Done')
+    return 0
+
+
+if __name__ == '__main__':
+    from docopt import docopt
+    args = docopt(__doc__)
+    args = {k.lstrip('-<').rstrip('>'):args[k] for k in args}
+    try:
+        if args.get('debug'):
+            logLevel = logging.DEBUG
+        else:
+            logLevel = logging.WARN
+        logging.basicConfig(
+                level=logLevel,
+                format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
+                datefmt='%y-%m-%d %H:%M:%S')
+        if args.get('prof'):
+            import cProfile
+            cProfile.run('main(args)')
+        else:
+            main(args)
+    except KeyboardInterrupt:
+        logging.warning('Interrupted')
+        sys.exit(1)
