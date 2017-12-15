@@ -139,7 +139,7 @@ def readBed(filename, chromSize, ignoreStrand=False, groupIdx=False):
             clusters.append(cid)
         else:
             clusters.append(1)
-    logging.info('done')
+    logging.debug('done')
     return features,clusters
 
 
@@ -149,7 +149,7 @@ def cacheBW(filename):
     bwData = {chrom:bw.values(chrom,0,chromSize[chrom],numpy=True) for chrom in chromSize}
     bw.close()
     nMB = sum([bwData[k].nbytes for k in bwData])/1024/1024
-    logging.info('{} cached using {}MB of memory'.format(filename, nMB))
+    logging.debug('{} cached using {}MB of memory'.format(filename, nMB))
     return bwData
 
 
@@ -188,7 +188,7 @@ def calcFlankingPositions(features, chromSize, stepWidth, nLeft, nRight=None, nM
             if midStepWidth == 0:
                 pass
         intervals.append(IntervalBoundary(f.chrom, f.start, f.end, f.strand, stepWidth, mLeft, mRight, nMid))
-    logging.info('done')
+    logging.debug('done')
     return intervals
 
 
@@ -202,7 +202,7 @@ def extractBigWigValues(bwData, intervals, nLeft, nRight, nMid=0, fillZero=False
             data[i] = x
         else:
             data[i] = x[::-1]
-    logging.info('done')
+    logging.debug('done')
     return data
 
 
@@ -270,6 +270,7 @@ def main(args):
                 k = np.array(clusters) == cid
                 writeStats('{}_{}'.format(name, cid), data[k], full=args['full'])
         success += 1
+        logging.info('{} done'.format(bwFileName))
     logging.info('{}/{} done successfully'.format(success, len(bigwigs)))
     return 0
 
