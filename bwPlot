@@ -81,6 +81,7 @@ def heatmap(ax, data, x, clstSep=np.array([], dtype=int), nMid=0, step=10, color
     im = ax.imshow(data, aspect='auto', extent=(x[0],x[-1],0,len(data)), cmap=colorMap)
     ax.axvline(x=0, lw=0.25, color='black')
     ax.axvline(x=nMid*step, lw=0.25, color='black')
+    ax.set_xticks([x[0], 0,nMid*step, x[len(x)-1]+step])
     for y in clstSep:
         ax.axhline(y=y, lw=0.5, color='white')
     return im
