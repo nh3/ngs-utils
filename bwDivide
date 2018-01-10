@@ -2,13 +2,14 @@
 '''
 Base-by-base division of one bigwig by another bigwig, e.g. ChIP divided by input, or by a constant
 
-Usage: bwDivide [-m <minD>]   -o <bigwig_out> <bigwig1> <bigwig2>
+Usage: bwDivide [-m <minD>] [-M] -o <bigwig_out> <bigwig1> <bigwig2>
        bwDivide -c <constant> -o <bigwig_out> <bigwig1>
 
 Options:
     -m <minD>        minimum depth of <bigwig2> as a proportion of median <bigwig2> depth [default: 0.25]
     -c <constant>    divide by this constant
     -o <bigwig_out>  output BigWig
+    -M                  make the median signal 1
     <bigwig1>        input BigWig1
     <bigwig2>        input BigWig2
 '''
@@ -22,8 +23,9 @@ logging.basicConfig(
         level=logging.WARN,
         format='%(asctime)s; %(levelname)s; %(funcName)s; %(message)s',
         datefmt='%y-%m-%d %H:%M:%S')
-import pyBigWig
 import numpy as np
+np.seterr(divide='ignore', invalid='ignore')
+import pyBigWig
 
 tol = 1e-16
 
@@ -34,9 +36,9 @@ def main(args):
     if args['bigwig2'] is not None:
         bw2 = pyBigWig.open(args['bigwig2'])
         minD = float(args['m'])
-        chroms = [(c,bw1.chroms(c)) for c in sorted(bw1.chroms())]
-        bw3 = pyBigWig.open(args['o'], 'w')
-        bw3.addHeader(chroms)
+
+        dat = dict()
+        chroms = [(c,bw1.chroms(c)) for c in sorted(bw1.chroms()) if c in bw2.chroms() and not c.endswith('M')]
         for c,l in chroms:
             x = bw1.values(c, 0, l, numpy=True)
             y = bw2.values(c, 0, l, numpy=True)
@@ -50,9 +52,22 @@ def main(args):
             e = np.append(k,len(z))
             v = z[e-1]
             u = (v != -1)
-            bw3.addEntries(np.array([c]*np.sum(u)), s[u], ends=e[u], values=v[u])
+            dat[c] = {'s':s[u], 'e':e[u], 'v':v[u]}
         bw1.close()
         bw2.close()
+
+        genomewide_median = np.nanmedian(np.concatenate([dat[c]['v'] for c in dat]))
+        logging.debug(genomewide_median)
+
+        bw3 = pyBigWig.open(args['o'], 'w')
+        bw3.addHeader(chroms)
+        for c,l in chroms:
+            logging.debug(c)
+            v = dat[c]['v']
+            n = v.shape[0]
+            if args['M']:
+                v = v/genomewide_median
+            bw3.addEntries(np.array([c]*n), dat[c]['s'], ends=dat[c]['e'], values=v)
         bw3.close()
     elif args['c'] is not None:
         constant = float(args['c'])
