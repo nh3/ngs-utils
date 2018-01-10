@@ -5,10 +5,13 @@ Usage: bwPlot (line | heatmap) [options] -o <outpdf> [<input>]
 Common options:
     -o <outpdf>     output pdf
     -m <nMid>       number of middle data points [default: 0]
-    -s <step>       step size [default: 10]
+    -w <step>       step width [default: 10]
     -c <colormap>   color map, "Set1" for line and "viridis" for heatmap as default [default: default]
+    -f <name>       feature name
     --xlim <xlim>   position range
+    --smooth <M>    smooth by moving average of <M> data points, 0 for no smoothing [default: 0]
     --facet <N>     make multi facets plot, <N> bigwig per facet [default: 0]
+    --fillzero      fill zero where data is missing
     --log           convert coverage to log scale
     <input>         input, read from stdin if omitted
 
@@ -102,19 +105,31 @@ def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], d
     pp.close()
     return 0
 
-def get_stats(data, l):
+def get_stats(data, l, smooth=0):
     N,m = data.shape
     if N > l*2:
         from scipy.stats import t
         from scipy.stats import sem
         n = N/l
         data = data.reshape(l,n,m)
+        if smooth > 1:
+            data = np.apply_along_axis(moving_average, 2, data, smooth)
         means = np.nanmean(data, axis=1)
         CIs = t.ppf(0.975,n-1)*sem(data, axis=1, nan_policy='omit')
     else:
         means = data[0::2]
         CIs = data[1::2]
+        if smooth > 1:
+            means = np.apply_along_axis(moving_average, 1, means, smooth)
+            CIs = np.apply_along_axis(moving_average, 1, CIs, smooth)
     return means,CIs
+
+def moving_average(x, n=5):
+    mask = np.isnan(x)
+    k = np.ones(n, dtype=int)
+    sums = np.convolve(np.where(mask,0,x), k, mode='same')
+    counts = np.convolve(~mask,k,mode='same')
+    return sums/counts
 
 def normalize_background(means, CIs, method='division'):
     minx = np.nanmin(means, axis=1, keepdims=True)
@@ -229,14 +244,16 @@ def open_input(filename=None):
             fh = open(filename, 'rb')
     return fh
 
-def parse_data(data, xlim=None):
+def parse_data(data, xlim=None, fillzero=False):
     N,M = data.shape
     positions = data[0,1:M].astype(int)
     names,nidx = np.unique(data[1:N,0], return_index=True)
     names = [data[1:N,0][i].decode('utf-8') for i in sorted(nidx)]
-    l,n,m = len(names),(N-1)/len(names),M-1
+    l,n,m = len(names),(N-1)/len(names),M-1 # l: number of bigwig, n: number of rows per bigwig, m: number of positions
     assert N-1 == l*n, 'incorrect <input> dimension'
     dmat = data[1:N,1:M].astype(float)
+    if fillzero:
+        dmat[np.isnan(dmat)] = 0.0
     if xlim is not None and len(xlim)==2:
         k = np.logical_and(positions >= xlim[0], positions<= xlim[1])
         positions = positions[k]
@@ -254,6 +271,9 @@ def calcFC(means):
     m = means.min(axis=1)
     return M/m
 
+def appendNameWithFeatureName(names, fname):
+    return ['{} @ {}'.format(nm,fname) for nm in names]
+
 def appendNameWithFC(names, FC):
     return ['{} | {:.2f}'.format(nm,fc) for nm,fc in list(zip(names, FC))]
 
@@ -261,11 +281,14 @@ def appendNameWithFC(names, FC):
 def main(args):
     logging.info(args)
     nMid = int(args['m'])
-    step = int(args['s'])
+    step = int(args['w'])
     outPdf = args['o']
+    featName = args['f']
     colorMap = args['c']
     xlim = parse_xlim(args['xlim'])
     logY = args['log']
+    fillzero = args['fillzero']
+    smooth = int(args['smooth'])
     if args['line']:
         if colorMap == 'default':
             colorMap = 'Set1'
@@ -291,18 +314,22 @@ def main(args):
     infh = open_input(args['input'])
     data = np.loadtxt(infh, dtype=bytes, delimiter='\t')
     infh.close()
-    names,positions,dmat = parse_data(data, xlim=xlim)
+    names,positions,dmat = parse_data(data, xlim=xlim, fillzero=fillzero)
 
     if args['line']:
-        means,CIs = get_stats(dmat, len(names))
+        means,CIs = get_stats(dmat, len(names), smooth=smooth)
         if normBg:
             means,CIs = normalize_background(means, CIs, method='division')
         elif normBg2:
             means,CIs = normalize_background(means, CIs, method='subtraction')
+        if featName is not None:
+            names = appendNameWithFeatureName(names, featName)
         if showFC:
             names = appendNameWithFC(names, calcFC(means))
         linePlot(names, positions, means, CIs, outPdf, nMid=nMid, step=step, logY=logY, pageSize=(pageW,pageH), colorMap=colorMap)
     elif args['heatmap']:
+        if smooth > 1:
+            dmat = np.apply_along_axis(moving_average, 1, dmat, smooth)
         if logY:
             dmat = np.log1p(dmat)
         N,m = dmat.shape
