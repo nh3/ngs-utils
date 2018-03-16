@@ -6,6 +6,7 @@ Options:
     <bam>           input bam
     -o <bw>         output bigwig
     -c <chromSize>  chromosome size
+    --pe            pair-end mode
     --rna           rna mode
     --no-fill       do not fill zero at sites of no data
     --no-norm       do not normalize by library size
@@ -36,6 +37,9 @@ def main(args):
         bgOpt = '-bga'
     else:
         bgOpt = '-bg'
+
+    if args['pe']:
+        bgOpt += ' -pc'
 
     if args['rna']:
         bgOpt += ' -split'
