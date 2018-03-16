@@ -7,10 +7,12 @@ Arguments:
 
 Options:
     -o <file>           output filename prefix [default: ]
-    --html              make html report(s), require package "ReportingTools"
+    --mincnt <int>      min read count per feature [default: 1]
     --factor <str>      factor name [default: strain]
     --ctrl <str>        control level [default: N2]
     --trmt <str>        treatment level, provide a comma separated list if there are multiple levels to test againt control
+    --pcutoff <float>   p-value cutoff [default: 0.05]
+    --html              make html report(s), require package "ReportingTools"
     --nCPU <int>        number of CPUs to use, require package "BiocParallel" [default: 1]
 ' -> doc
 
@@ -19,10 +21,12 @@ tryCatch(opts <- docopt(doc, strip_names=F), error=function(e) { message(doc); q
 names(opts) <- sub('^--?', '', names(opts))
 names(opts) <- gsub('[<>]', '', names(opts))
 
+minCnt <- as.integer(opts[['mincnt']])
 condition <- opts[['factor']]
 ctrl <- opts[['ctrl']]
 nCPU <- as.integer(opts[['nCPU']])
 outprefix <- opts[['o']]
+pcutoff <- as.numeric(opts[['pcutoff']])
 outdir <- dirname(paste(outprefix, 'txt', sep='.'))
 
 suppressWarnings(suppressMessages(library(DESeq2)))
@@ -36,7 +40,7 @@ export_result <- function(res, dds, outprefix, ctrl, trmt=NULL, doParallel=F, ma
     if (is.null(trmt)) trmt <- 'all'
     testName <- sprintf('%s-vs-%s', trmt, ctrl)
     cat(testName)
-    cat(summary(res, alph=0.05))
+    cat(summary(res, alpha=pcutoff))
     cat('\n')
 
     resOrdered <- res[order(res$padj),]
@@ -46,7 +50,7 @@ export_result <- function(res, dds, outprefix, ctrl, trmt=NULL, doParallel=F, ma
     if (makeHTML) {
         outdir <- dirname(outfile)
         dqReport <- HTMLReport(shortName=testName, title=testName, reportDirectory=outdir)
-        publish(res, dqReport, DataSet=dds, factor=droplevels(dds$condition), pvalueCutoff=0.05, reportDir=outdir)
+        publish(res, dqReport, DataSet=dds, factor=droplevels(dds$condition), pvalueCutoff=pcutoff, reportDir=outdir)
         finish(dqReport)
     }
 }
@@ -54,10 +58,14 @@ export_result <- function(res, dds, outprefix, ctrl, trmt=NULL, doParallel=F, ma
 dat <- read.delim(opts[['countTable']], header=T, stringsAsFactors=F, comment='#')
 mat <- as.matrix(dat[,-1])
 rownames(mat) <- dat[,1]
+keep <- rowSums(mat < minCnt) == 0
+mat <- mat[keep,]
 
 sdat <- read.delim(opts[['sampleTable']], header=T, stringsAsFactors=F, comment='#')
 stopifnot(condition %in% colnames(sdat) && ctrl %in% sdat[[condition]])
 sdat$condition <- relevel(factor(sdat[[condition]]), ref=ctrl)
+
+mat <- mat[,colnames(mat) %in% sdat$sample]
 
 dds <- DESeqDataSetFromMatrix(countData=mat, colData=sdat, design=~condition)
 
