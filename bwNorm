@@ -7,7 +7,7 @@ Usage: bwNorm [-l <readLen>] [-x <chrom>] [-m <method>] [-s <scale>] (<input>) (
 Options:
     <input>         input linear bigwig
     <output>        output bigwig
-    -m <method>     normalization method, 'rpm', 'log2', 'zsc', 'bg1' [default: rpm]
+    -m <method>     normalization method, 'rpm', 'log2', 'zsc', 'beads', 'bgsub', 'bgdiv' [default: rpm]
     -l <readLen>    read length, required if method is 'rpm' [default: 50]
     -x <chrom>      exclude chromosome
     -s <scale>      scaling factor [default: 1.0]
@@ -24,7 +24,7 @@ logging.basicConfig(
         datefmt='%y-%m-%d %H:%M:%S')
 import numpy as np
 import pyBigWig
-from scipy.stats import mode
+from scipy.stats import gaussian_kde
 
 # Calculate RPM normalization coefficient
 def calcRPMCoef(bw, readLen, exChrom=None):
@@ -35,10 +35,21 @@ def calcRPMCoef(bw, readLen, exChrom=None):
     logging.info('totalBaseCount/readCount/normCoef = {}/{}/{}'.format(totalBaseCount, readCount, normCoef))
     return normCoef
 
+def getMaximumDensityPoint(x):
+    if len(x) > 100000:
+        x = np.random.choice(x, size=100000, replace=False)
+    x = x[~np.isnan(x)]
+    x = x[x>0]
+    kernel = gaussian_kde(np.log10(x))
+    a,b = np.percentile(np.log10(x), (25,75))
+    x1 = np.linspace(a, b, 1000)
+    y1 = kernel(x1)
+    return 10**x1[np.argmax(y1)]
+
 def main(args):
     logging.debug(args)
     method = args['m']
-    assert method in ('rpm','log2','zsc','bg1'), 'unsupported method: {}'.format(method)
+    assert method in ('rpm','log2','zsc','beads','bgsub','bgdiv'), 'unsupported method: {}'.format(method)
     if method == 'rpm':
         assert args['l'] is not None, "<readLen> required by method 'rpm'"
         readLen = int(args['l'])
@@ -71,26 +82,34 @@ def main(args):
             mu = iBW.stats(chrom, exact=True)[0]
             sigma = iBW.stats(chrom, type='std', exact=True)[0]
             oBW.addEntries(np.array([chrom]*n), intervals[:,0].astype(np.int64), ends=intervals[:,1].astype(np.int64), values=(intervals[:,2]-mu)/sigma)
-    elif method == 'bg1':
+    elif method == 'beads':
         for chrom in sortedChroms:
             logging.debug(chrom)
-            l = iBW.chroms(chrom)
             intervals = np.array(iBW.intervals(chrom))
             n = len(intervals)
-            x = intervals[:,2]
-            # interval mode
-            #y = np.linspace(np.min(x),np.max(x),101)
-            #z = np.digitize(x, y)
-            #k = mode(z, axis=None)[0][0]
-            #m = (y[k-1]+y[k])/2
-            # interval median
+            v0 = intervals[:,2]
+            L = iBW.chroms(chrom)
+            x = iBW.values(chrom, 0, L, numpy=True)
             m = np.nanmedian(x)
-            # bp median
-            #y = iBW.values(chrom, 0, l, numpy=True)
-            #m = np.nanmedian(y)
-            logging.debug(m)
-            v = x - (m - 1)
-            v[v<0] = 0
+            if m == 0:
+                m = np.nanmedian(x[x>0])
+            v = v0 / m
+            oBW.addEntries(np.array([chrom]*n), intervals[:,0].astype(np.int64), ends=intervals[:,1].astype(np.int64), values=v)
+    elif method.startswith('bg'):
+        for chrom in sortedChroms:
+            logging.debug(chrom)
+            intervals = np.array(iBW.intervals(chrom))
+            n = len(intervals)
+            v0 = intervals[:,2]
+            L = iBW.chroms(chrom)
+            x = iBW.values(chrom, 0, L, numpy=True)
+            m = getMaximumDensityPoint(x)
+            if method == 'bgdiv':
+                v = v0 / m
+            else:
+                v = v0 - m
+                v[v<0] = 0.0
+                v = v + 1.0
             oBW.addEntries(np.array([chrom]*n), intervals[:,0].astype(np.int64), ends=intervals[:,1].astype(np.int64), values=v)
     else:
         logging.error('unsupported method: {}'.format(method))
