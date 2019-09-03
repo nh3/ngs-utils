@@ -1,0 +1,59 @@
+#!/usr/bin/env Rscript
+'Usage: strandCrossCorr.R [options] [-o <output>] [-p <outpdf>] <inputBam>
+
+Options:
+    -m <int>        maximum shift distance, also used as background [default: 400]
+    -d <int>        expected shift distance of signal peak [default: 100]
+    -D <int>        expected shift distance of fake peak [default: 20]
+    -s <int>        step size in shift distance [default: 10]
+    -o <file>       output table [default: null]
+    -p <file>       output pdf [default: null]
+'-> doc
+
+opts <- handle_args(doc)
+
+suppressWarnings(suppressMessages(library(GenomicAlignments)))
+
+remove_Mt <- function(x) {
+    chrM <- grep('M', seqnames(seqinfo(x)), value=T)
+    dropSeqlevels(x, chrM)
+}
+
+maxShift <- as.integer(opts$m)
+sigShift <- as.integer(opts$d)
+fakeShift <- as.integer(opts$D)
+step <- as.integer(opts$s)
+inputBam <- opts[['<inputBam>']]
+output <- opts$o
+outpdf <- opts$p
+
+shiftDistance <- seq(0, maxShift, step)
+
+ga <- readGAlignments(inputBam, index=paste(inputBam,'bai',sep='.')) %>% remove_Mt()
+ga.plus <- ga[strand(ga)=='+',]
+ga.minus <- ga[strand(ga)=='-',]
+
+ga.minus.cvg <- coverage(ga.minus)
+chrI.minus.cvg <- as.numeric(ga.minus.cvg[[1]])
+crossCorr <- sapply(shiftDistance, function(d) {
+    ga.plus.cvg <- coverage(ga.plus, shift=d)
+    chrI.plus.cvg <- as.numeric(ga.plus.cvg[[1]])
+    cc <- cor(chrI.plus.cvg, chrI.minus.cvg)
+})
+k1 <- which.min(abs(shiftDistance-sigShift))
+k2 <- which.min(abs(shiftDistance-fakeShift))
+k3 <- which.min(abs(shiftDistance-maxShift))
+NSC <- crossCorr[k1]/crossCorr[k3]
+RSC <- crossCorr[k1]/crossCorr[k2]
+cat(sprintf('%.4f\t%.4f\n', NSC, RSC))
+
+if (output!='null') {
+    result <- data.frame(shiftDistance, crossCorr)
+    write.table(result, output, sep='\t', quote=F, col.names=T, row.names=F)
+}
+
+if (outpdf!='null') {
+    pdf(file=outpdf)
+    plot(crossCorr~shiftDistance, result, type='l')
+    dev.off()
+}

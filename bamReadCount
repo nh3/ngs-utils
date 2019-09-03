@@ -1,0 +1,14 @@
+#!/bin/bash
+
+bam=$1
+
+if [[ "x$bam" == "x" ]]; then
+    echo "Usage: bamReadCount <bam>"
+    exit
+fi
+
+if [[ -e ${bam}.bai ]]; then
+    samtools idxstats $bam | awk '{s=s+$3} END{print s}'
+else
+    samtools view -@ 4 -c $bam
+fi
