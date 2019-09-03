@@ -100,9 +100,9 @@ def heatmapPlot(names, positions, data, rowOrder, outpdf, clstSep=np.array([], d
             fig.colorbar(im, ax=ax[0,i])
     if not sepZ:
         fig.colorbar(im, ax=ax[0].tolist())
-    pp = PdfPages(outpdf)
-    pp.savefig(fig)
-    pp.close()
+    #pp = PdfPages(outpdf)
+    plt.savefig(outpdf, bbox_inches='tight')
+    #pp.close()
     return 0
 
 def get_stats(data, l, smooth=0):

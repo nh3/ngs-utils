@@ -13,7 +13,9 @@ Options:
     -m <mid>        number of data points inside the interval [default: 0]
     --mode <mode>   feature mode, 5p/3p/mid, default is to use whole length
     --fillzero      fill zero where there is no data
+    --log           do log2(x + 1e-3) transformation
     --ignstr        ignore strand information from the input BED
+    --exclude0      exclude 0 when calculating stats
     --grpidx <int>  specify group column index (1-based) in input BED
     --full          print full value table rather than stats (mean,2.5pct,median,97.5pct)
 '''
@@ -33,6 +35,10 @@ import pyBigWig
 import numpy as np
 from scipy.stats import sem
 from scipy.stats import t
+
+
+ZERO_EXPRESSION = 1e-3
+
 
 class GenomicFeature(object):
     def __init__(self, chrom, start, end, name, strand):
@@ -212,7 +218,9 @@ def writePositions(nLeft, nRight, nMid=0, stepWidth=10, fh=sys.stdout):
     np.savetxt(fh, np.hstack(('position', np.arange(-nLeft, nMid+nRight, dtype=int)*stepWidth)).reshape((1,m+1)), fmt='%s', delimiter='\t')
 
 
-def writeStats(name, data, fh=sys.stdout, full=False):
+def writeStats(name, data, fh=sys.stdout, full=False, exclude_zero=False):
+    if exclude_zero:
+        data[data <= ZERO_EXPRESSION] = np.nan
     if full:
         stats = data
     else:
@@ -256,6 +264,8 @@ def main(args):
     for i,bwFileName in enumerate(bigwigs):
         bwData = cacheBW(bwFileName)
         data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
+        if args['log']:
+            data = np.log10(data + ZERO_EXPRESSION)
         #try:
         #    bwData = cacheBW(bwFileName)
         #    data = extractBigWigValues(bwData, intervals, nLeft, nRight, nMid, fillZero=args['fillzero'])
@@ -264,11 +274,11 @@ def main(args):
         #    continue
         name = os.path.splitext(os.path.basename(bwFileName))[0]
         if len(set(clusters)) == 1:
-            writeStats(name, data, full=args['full'])
+            writeStats(name, data, full=args['full'], exclude_zero=args['exclude0'])
         else:
             for cid in sorted(set(clusters)):
                 k = np.array(clusters) == cid
-                writeStats('{}_{}'.format(name, cid), data[k], full=args['full'])
+                writeStats('{}_{}'.format(name, cid), data[k], full=args['full'], exclude_zero=args['exclude0'])
         success += 1
         logging.info('{} done'.format(bwFileName))
     logging.info('{}/{} done successfully'.format(success, len(bigwigs)))

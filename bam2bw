@@ -34,9 +34,9 @@ def main(args):
     extraOpt = args['x']
 
     if not args['no-fill']:
-        bgOpt = '-bga'
-    else:
         bgOpt = '-bg'
+    else:
+        bgOpt = '-bga'
 
     if args['pe']:
         bgOpt += ' -pc'
@@ -45,26 +45,24 @@ def main(args):
         bgOpt += ' -split'
 
     if not args['no-norm']:
-        if os.path.exists(bamFn+'.bai'):
-            n = sbp.check_output("samtools idxstats {} | awk '{{s=s+$3}}END{{print s}}'".format(bamFn), shell=True, executable='/bin/bash')
-        else:
-            n = sbp.check_output('sambamba view -c {}'.format(bamFn), shell=True, executable='/bin/bash')
+        if not os.path.exists(bamFn+'.bai'):
+            sbp.check_call('samtools index -@ 4 {}'.format(bamFn), shell=True, executable='/bin/bash')
+        n = sbp.check_output("samtools idxstats {} | awk '{{s=s+$3}}END{{print s}}'".format(bamFn), shell=True, executable='/bin/bash')
         scale = 1e6/float(n)
     else:
         scale = 1.0
 
     bdgFh,bdgFn = tempfile.mkstemp()
 
-    cmd1 = 'bedtools genomecov -ibam {bam} -scale {scale} {bgOpt} {extraOpt} > {bdgFn}'.format(
-            bam=bamFn, scale=scale, bgOpt=bgOpt, extraOpt=extraOpt, bdgFn=bdgFn)
+    cmd1 = 'bedtools genomecov -ibam {bam} -g {chromSize} -scale {scale} {bgOpt} {extraOpt} | bedSort stdin {bdgFn}'.format(
+            bam=bamFn, chromSize=chromSize, scale=scale, bgOpt=bgOpt, extraOpt=extraOpt, bdgFn=bdgFn)
     sbp.check_call(cmd1, shell=True, executable='/bin/bash')
     cmd2 = 'bedGraphToBigWig {bdg} {chromSize} {bw}'.format(bdg=bdgFn, chromSize=chromSize, bw=bwFn)
     try:
         sbp.check_call(cmd2, shell=True, executable='/bin/bash')
+        os.remove(bdgFn)
     except CalledProcessError as e:
         raise(e)
-    finally:
-        os.remove(bdgFn)
 
     logging.info('Done')
     return 0
