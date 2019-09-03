@@ -12,6 +12,8 @@ Options:
     --ctrl <str>        control level [default: N2]
     --trmt <str>        treatment level, provide a comma separated list if there are multiple levels to test againt control
     --pcutoff <float>   p-value cutoff [default: 0.05]
+    --fccutoff <float>  fold change cut off [default: 1]
+    --qc                make qc plots, require package "dplyr","tidyr","ggplot2","ggrepel","viridis","pheatmap"
     --html              make html report(s), require package "ReportingTools"
     --nCPU <int>        number of CPUs to use, require package "BiocParallel" [default: 1]
 ' -> doc
@@ -27,6 +29,7 @@ ctrl <- opts[['ctrl']]
 nCPU <- as.integer(opts[['nCPU']])
 outprefix <- opts[['o']]
 pcutoff <- as.numeric(opts[['pcutoff']])
+fccutoff <- as.numeric(opts[['fccutoff']])
 outdir <- dirname(paste(outprefix, 'txt', sep='.'))
 
 suppressWarnings(suppressMessages(library(DESeq2)))
@@ -46,6 +49,10 @@ export_result <- function(res, dds, outprefix, ctrl, trmt=NULL, doParallel=F, ma
     resOrdered <- res[order(res$padj),]
     outfile <- ifelse(outprefix=='', sprintf('%s.txt', testName), sprintf('%s.%s.txt', outprefix, testName))
     write.table(as.data.frame(resOrdered), file=outfile, quote=F, sep='\t')
+    outpdf <- ifelse(outprefix=='', sprintf('%s.pdf', testName), sprintf('%s.%s.pdf', outprefix, testName))
+    pdf(file=outpdf)
+    plotMA(res, ylim=c(-3,3), cex=0.8, colNonSig=colalpha('grey32',0.2), colSig='red3')
+    dev.off()
 
     if (makeHTML) {
         outdir <- dirname(outfile)
@@ -55,7 +62,55 @@ export_result <- function(res, dds, outprefix, ctrl, trmt=NULL, doParallel=F, ma
     }
 }
 
-dat <- read.delim(opts[['countTable']], header=T, stringsAsFactors=F, comment='#')
+export_qcPlots <- function(dds, outprefix) {
+    suppressWarnings(suppressMessages(library(ggplot2)))
+
+    outfile <- ifelse(outprefix=='', 'diffQC.pdf', sprintf('%s.diffQC.pdf', outprefix))
+    vsd <- vst(dds, blind=F)
+    pdf(file=outfile)
+    plot_expBoxplot(vsd)
+    plot_corrHeatmap(vsd)
+    plot_pcaPlot(vsd)
+    dev.off()
+}
+
+plot_expBoxplot <- function(vsd) {
+    if (suppressWarnings(suppressMessages(require(dplyr))) &&
+            suppressWarnings(suppressMessages(require(tidyr)))) {
+        edat <- as.data.frame(assay(vsd)) %>% gather('sample','expression',1:length(vsd$sample)) %>%
+                inner_join(data.frame(sample=vsd$sample, condition=vsd$condition))
+        print(ggplot(edat, aes(x=sample, y=log2(expression), fill=condition))
+                + geom_violin()
+                + geom_boxplot(notch=T, fill='white', alpha=0.1)
+                + facet_grid(.~condition, scales='free_x', space='free_x')
+                + theme(legend.position='top',
+                        axis.text.x=element_text(angle=90, hjust=1)))
+    }
+}
+
+plot_corrHeatmap <- function(vsd) {
+    if (suppressWarnings(suppressMessages(require(pheatmap))) &&
+            suppressWarnings(suppressMessages(require(viridis)))) {
+        cmat <- cor(log1p(assay(vsd)))
+        rownames(cmat) <- paste(vsd$sample, vsd$condition, sep=' : ')
+        colors <- viridis(255)
+        pheatmap(cmat, breaks=seq(0.9,1,length.out=256), show_colnames=F, fontsize=10, col=colors)
+    }
+}
+
+plot_pcaPlot <- function(vsd) {
+    if (suppressWarnings(suppressMessages(require(ggrepel)))) {
+        pdat <- plotPCA(vsd, intgroup='condition', ntop=2500, returnData=T)
+        pctVar <- round(100*attr(pdat, 'percentVar'))
+        print(ggplot(pdat, aes(x=PC1, y=PC2, color=condition))
+                + geom_point()
+                + geom_text_repel(aes(label=name), size=3)
+                + xlab(paste0('PC1: ', pctVar[1], '% variance'))
+                + ylab(paste0('PC2: ', pctVar[2], '% variance')))
+    }
+}
+
+dat <- read.delim(opts[['countTable']], header=T, stringsAsFactors=F, check.names=F, comment='#')
 mat <- as.matrix(dat[,-1])
 rownames(mat) <- dat[,1]
 keep <- rowSums(mat < minCnt) == 0
@@ -80,17 +135,21 @@ if (makeHTML) suppressWarnings(suppressMessages(library(ReportingTools)))
 
 dir.create(outdir, showWarnings=F)
 
-dds <- DESeq(dds, parallel=doParallel)
+dds <- DESeq(dds, betaPrior=T, parallel=doParallel)
 export_normCounts(dds, outprefix)
+if (opts[['qc']]) export_qcPlots(dds, outprefix)
+
 if (is.null(opts[['trmt']])) {
-    res <- results(dds, addMLE=T, parallel=doParallel)
-    export_result(res, dds, outprefix, ctrl, NULL, doParallel, makeHTML)
+    res <- results(dds, lfcThreshold=log2(fccutoff), altHypothesis='greaterAbs', addMLE=F, parallel=doParallel)
+    #res <- results(dds, contrast=contrast, addMLE=F, parallel=doParallel)
+    export_result(res, dds, outprefix, ctrl, NULL, doParallel, makeHTML=makeHTML)
 } else {
     treatments <- unlist(strsplit(opts[['trmt']], ','))
     for (trmt in treatments) {
         contrast <- c('condition',trmt,ctrl)
-        res <- results(dds, contrast=contrast, addMLE=T, parallel=doParallel)
+        res <- results(dds, lfcThreshold=log2(fccutoff), altHypothesis='greaterAbs', addMLE=F, parallel=doParallel)
+        #res <- results(dds, contrast=contrast, addMLE=F, parallel=doParallel)
         k <- sdat$condition %in% c(ctrl, trmt)
-        export_result(res, dds[,k], outprefix, ctrl, trmt, doParallel, makeHTML)
+        export_result(res, dds[,k], outprefix, ctrl, trmt, doParallel, makeHTML=makeHTML)
     }
 }
