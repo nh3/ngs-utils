@@ -8,9 +8,11 @@ Arguments:
 Options:
     -o <file>           output filename prefix [default: ]
     --mincnt <int>      min read count per feature [default: 1]
+    --minfrac <float>   min fraction of samples with feature read count under --mincnt [default: 0]
     --factor <str>      factor name [default: strain]
     --ctrl <str>        control level [default: N2]
     --trmt <str>        treatment level, provide a comma separated list if there are multiple levels to test againt control
+    --covar <str>       co-variates, provide a comma separated list if there are multiple co-variates
     --pcutoff <float>   p-value cutoff [default: 0.05]
     --fccutoff <float>  fold change cut off [default: 1]
     --qc                make qc plots, require package "dplyr","tidyr","ggplot2","ggrepel","viridis","pheatmap"
@@ -24,10 +26,16 @@ names(opts) <- sub('^--?', '', names(opts))
 names(opts) <- gsub('[<>]', '', names(opts))
 
 minCnt <- as.integer(opts[['mincnt']])
+minFrac <- as.numeric(opts[['minfrac']])
 condition <- opts[['factor']]
 ctrl <- opts[['ctrl']]
 nCPU <- as.integer(opts[['nCPU']])
-outprefix <- opts[['o']]
+if (is.null(opts[['covar']])) {
+    covar <- NULL
+} else {
+    covar <- strsplit(opts[['covar']], ',')[[1]]
+}
+outprefix <- ifelse(is.null(opts[['o']]), '', opts[['o']])
 pcutoff <- as.numeric(opts[['pcutoff']])
 fccutoff <- as.numeric(opts[['fccutoff']])
 outdir <- dirname(paste(outprefix, 'txt', sep='.'))
@@ -92,9 +100,11 @@ plot_corrHeatmap <- function(vsd) {
     if (suppressWarnings(suppressMessages(require(pheatmap))) &&
             suppressWarnings(suppressMessages(require(viridis)))) {
         cmat <- cor(log1p(assay(vsd)))
-        rownames(cmat) <- paste(vsd$sample, vsd$condition, sep=' : ')
+        rownames(cmat) <- vsd$sample
         colors <- viridis(255)
-        pheatmap(cmat, breaks=seq(0.9,1,length.out=256), show_colnames=F, fontsize=10, col=colors)
+        row_annot <- data.frame(condition=vsd$condition)
+        rownames(row_annot) <- vsd$sample
+        pheatmap(cmat, breaks=seq(0.9,1,length.out=256), show_colnames=F, fontsize=10, col=colors, annotation_row=row_annot)
     }
 }
 
@@ -111,18 +121,25 @@ plot_pcaPlot <- function(vsd) {
 }
 
 dat <- read.delim(opts[['countTable']], header=T, stringsAsFactors=F, check.names=F, comment='#')
+colnames(dat) <- as.character(colnames(dat))
 mat <- as.matrix(dat[,-1])
-rownames(mat) <- dat[,1]
-keep <- rowSums(mat < minCnt) == 0
+rownames(mat) <- as.character(dat[,1])
+# force integer input
+mat <- round(mat)
+mode(mat) <- 'integer'
+keep <- (rowSums(mat < minCnt) / ncol(mat)) < minFrac
 mat <- mat[keep,]
 
 sdat <- read.delim(opts[['sampleTable']], header=T, stringsAsFactors=F, comment='#')
+sdat$sample <- as.character(sdat$sample)
 stopifnot(condition %in% colnames(sdat) && ctrl %in% sdat[[condition]])
 sdat$condition <- relevel(factor(sdat[[condition]]), ref=ctrl)
+stopifnot(all(covar %in% colnames(sdat)))
 
 mat <- mat[,colnames(mat) %in% sdat$sample]
 
-dds <- DESeqDataSetFromMatrix(countData=mat, colData=sdat, design=~condition)
+formula_components <- c(covar, 'condition')
+dds <- DESeqDataSetFromMatrix(countData=mat, colData=sdat, design=as.formula(paste0('~', paste(formula_components, collapse='+'))))
 
 packs <- rownames(installed.packages())
 doParallel <- nCPU > 1 && 'BiocParallel' %in% packs
@@ -141,14 +158,13 @@ if (opts[['qc']]) export_qcPlots(dds, outprefix)
 
 if (is.null(opts[['trmt']])) {
     res <- results(dds, lfcThreshold=log2(fccutoff), altHypothesis='greaterAbs', addMLE=F, parallel=doParallel)
-    #res <- results(dds, contrast=contrast, addMLE=F, parallel=doParallel)
     export_result(res, dds, outprefix, ctrl, NULL, doParallel, makeHTML=makeHTML)
 } else {
     treatments <- unlist(strsplit(opts[['trmt']], ','))
     for (trmt in treatments) {
-        contrast <- c('condition',trmt,ctrl)
-        res <- results(dds, lfcThreshold=log2(fccutoff), altHypothesis='greaterAbs', addMLE=F, parallel=doParallel)
-        #res <- results(dds, contrast=contrast, addMLE=F, parallel=doParallel)
+        contrast <- c('condition', trmt, ctrl)
+        #res <- results(dds, lfcThreshold=log2(fccutoff), altHypothesis='greaterAbs', addMLE=F, parallel=doParallel)
+        res <- results(dds, contrast=contrast, addMLE=F, parallel=doParallel)
         k <- sdat$condition %in% c(ctrl, trmt)
         export_result(res, dds[,k], outprefix, ctrl, trmt, doParallel, makeHTML=makeHTML)
     }
